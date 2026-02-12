@@ -1,0 +1,46 @@
+1: Fix IDs + add document identity
+Add doc_id (content-based hash of PDF bytes) to every point payload.
+Change point_id to be unique per chunk (hash of doc_id:page:chunk_idx or UUID).
+Add a “reindex doc” flow: delete all points where doc_id == X before upserting.
+
+2: PDF de-duplication logic (content-aware)
+Compute doc_id = sha1(pdf_bytes) (or similar) at ingest time.
+If doc_id already exists in Qdrant, skip indexing (or treat as “update” if you keep versions).
+Also store source_path, filename, indexed_at, and optionally a version_id (mtime/hash) to detect “same file new content”.
+Optional: near-duplicate detection (same paper different formatting) via SimHash/MinHash over cleaned text, but start with byte-hash first.
+
+3: Add delete/update endpoints + basic admin ops
+Endpoints or CLI commands:
+DELETE /docs/{doc_id} (delete by filter)
+POST /reindex (rebuild one doc)
+GET /stats (count points, docs, last index time)
+
+4: Speed up indexing (batch embedding)
+Encode chunks in batches: model.encode(chunks, batch_size=32, normalize_embeddings=True).
+Upsert in batches (e.g., 512–2048 points per call).
+
+5: Improve PDF text cleanup + chunking
+Dehyphenate line breaks (inter-\naction → interaction).
+Strip repeating headers/footers.
+Chunk by sentences/paragraphs with a token/char budget, not word count.
+Tag payload with section when detectable (“Abstract”, “Methods”, “References”).
+
+6: Hybrid retrieval (dense + lexical)
+Add BM25/sparse component and combine with dense vectors (huge win for gene names, IDs, units).
+Keep dense-only as fallback if needed.
+
+7: Add metadata filters in search
+Support filters: filename, doc_id, year, section, page_range.
+Expose as query params (e.g., /search?q=...&doc_id=...&section=methods).
+
+8: Add reranking
+Retrieve top ~50, rerank with a cross-encoder reranker, return top 10.
+Improves “the top result is close but not the answer” problem.
+
+9: Return better context in results
+Return full chunk plus neighbors (prev/next chunk) or expand to ±N characters.
+Optional highlighting of query terms.
+
+10: Evaluation harness (so you can prove it’s better)
+Collect ~30 real lab queries + expected relevant passages.
+Track Recall@10 / MRR before vs after hybrid/rerank/chunking changes.
