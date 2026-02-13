@@ -1,0 +1,87 @@
+{
+  "files": {
+    "pdfs/Contrasting Effects of t10,c12- and c9,t11-Conjugated Linoleic.pdf": {
+      "doc_id": "b9e6f5cbcf6b5256dc406ebd6af71d45aaa39880",
+      "mtime_ns": 1771015052690843071,
+      "size": 83192,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.557794+00:00"
+    },
+    "pdfs/Development and Validation of a Bioanalytical Method for the Quantification of Nitrated Fatty Acids in Plasma Using LC-MSMS Application to Cardiovascular Patients.pdf": {
+      "doc_id": "38f7ae573348b670ce4735845a74e29d26985984",
+      "mtime_ns": 1771015052693878712,
+      "size": 791259,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.561399+00:00"
+    },
+    "pdfs/Distribution of conjugated linoleic acid and metabolites in different lipid fractions in the rat liver.pdf": {
+      "doc_id": "496ed5760754f0b85dede012d583e56e6894b343",
+      "mtime_ns": 1771015052699266302,
+      "size": 1090223,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.567490+00:00"
+    },
+    "pdfs/Distributions of conjugated linoleic acid CLA isomers in tissue lipid classes of pigs fed a commercial CLA mixture determined by gas chromatography and silver ion-high-performance liquid chromatography.pdf": {
+      "doc_id": "d188ca7b3dd4cbf105ae6f2926aa4c0093e7c1b0",
+      "mtime_ns": 1771015052700862280,
+      "size": 567871,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.571757+00:00"
+    },
+    "pdfs/Effect of dietary conjugated linoleic acid (CLA) on metabolism of isotope-labeled oleic, linoleic, and CLA isomers in women1.pdf": {
+      "doc_id": "a85df0ff3ccadd5276e751e03675bbb116ba3e10",
+      "mtime_ns": 1771015052702034774,
+      "size": 276274,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.575782+00:00"
+    },
+    "pdfs/Integrated GC-MS MS Metabolomics in Cardiovascular Disease Targeted Nitro-Oleic Acid Quantification Meets Untargeted Profiling.pdf": {
+      "doc_id": "f004cf4887765aed96acc38c28151f9f6147cb99",
+      "mtime_ns": 1771015052726309624,
+      "size": 8316525,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.588387+00:00"
+    },
+    "pdfs/Isomeric distribution of conjugated linoleic acids (CLA) in the tissues of layer hens fed a CLA diet.pdf": {
+      "doc_id": "251af4823ad9fe20d7f66ad229f5df3df30e8064",
+      "mtime_ns": 1771015052728491735,
+      "size": 83046,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.591997+00:00"
+    },
+    "pdfs/Lipids - 2001 - Sergiel - \u2010Oxidation of conjugated linoleic acid isomers and linoleic acid in rats.pdf": {
+      "doc_id": "f272d9a9c3dedb56668a8bb73ec3efbe7ac3fee1",
+      "mtime_ns": 1771015052728958670,
+      "size": 64778,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.595379+00:00"
+    },
+    "pdfs/Not just sugar Metabolic control of neutrophil development and effector functions.pdf": {
+      "doc_id": "bc34eaeda0ce06a8bbae8fae694f88fec348bd42",
+      "mtime_ns": 1771015052732797612,
+      "size": 1370197,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.599986+00:00"
+    },
+    "pdfs/Simultaneous determination of \u03b2-hydroxybutyrate and \u03b2-hydroxy-\u03b2-methylbutyrate in human whole blood using hydrophilic interaction liquid chromatography electrospray tandem mass spectrometry.pdf": {
+      "doc_id": "6c6833580f853ae2006e0cb87cf2a9e448d65fbf",
+      "mtime_ns": 1771015052734553216,
+      "size": 401629,
+      "status": "skipped_doc_id_exists",
+      "updated_at": "2026-02-13T21:47:12.603527+00:00"
+    },
+    "pdfs/duplicate1.pdf": {
+      "mtime_ns": 1771015052734553216,
+      "size": 401629,
+      "status": "blacklisted",
+      "updated_at": "2026-02-13T21:47:30.934102+00:00"
+    },
+    "pdfs/duplicate2.pdf": {
+      "mtime_ns": 1771015052732797612,
+      "size": 1370197,
+      "status": "blacklisted",
+      "updated_at": "2026-02-13T21:47:30.934135+00:00"
+    }
+  },
+  "version": 1
+}

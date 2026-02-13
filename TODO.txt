@@ -1,11 +1,12 @@
 1: Fix IDs + add document identity
-Add doc_id (content-based hash of PDF bytes) to every point payload.
-Change point_id to be unique per chunk (hash of doc_id:page:chunk_idx or UUID).
-Add a “reindex doc” flow: delete all points where doc_id == X before upserting.
+DONE: Add doc_id (sha1 of PDF bytes) to every point payload.
+DONE: Change point_id to be unique per chunk (deterministic hash of doc_id:page:chunk_idx).
+TODO: Add a “reindex doc” flow: delete all points where doc_id == X before upserting.
 
 2: PDF de-duplication logic (content-aware)
-Compute doc_id = sha1(pdf_bytes) (or similar) at ingest time.
-If doc_id already exists in Qdrant, skip indexing (or treat as “update” if you keep versions).
+DONE: Compute doc_id = sha1(pdf_bytes) at ingest time.
+DONE: If doc_id already exists in Qdrant, skip indexing.
+DONE: If two different files have the same doc_id, keep the first PDF alphabetically as canonical and add the others to pdfs_blacklist.txt (ignored on future runs).
 Also store source_path, filename, indexed_at, and optionally a version_id (mtime/hash) to detect “same file new content”.
 Optional: near-duplicate detection (same paper different formatting) via SimHash/MinHash over cleaned text, but start with byte-hash first.
 

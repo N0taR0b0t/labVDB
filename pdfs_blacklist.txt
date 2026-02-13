@@ -1,0 +1,6 @@
+# PDFs to ignore during indexing (one path per line).
+# Auto-updated by indexer.py when duplicates are detected.
+# Updated: 2026-02-13T21:16:38.370948+00:00
+
+pdfs/duplicate1.pdf
+pdfs/duplicate2.pdf

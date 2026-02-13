@@ -1,3 +1,4 @@
+numpy==1.26.4
 PyMuPDF>=1.24.0
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
