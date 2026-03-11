@@ -1,47 +1,124 @@
-1: Fix IDs + add document identity
-DONE: Add doc_id (sha1 of PDF bytes) to every point payload.
-DONE: Change point_id to be unique per chunk (deterministic hash of doc_id:page:chunk_idx).
-TODO: Add a “reindex doc” flow: delete all points where doc_id == X before upserting.
+labVDB prioritized TODO
 
-2: PDF de-duplication logic (content-aware)
-DONE: Compute doc_id = sha1(pdf_bytes) at ingest time.
-DONE: If doc_id already exists in Qdrant, skip indexing.
-DONE: If two different files have the same doc_id, keep the first PDF alphabetically as canonical and add the others to pdfs_blacklist.txt (ignored on future runs).
-Also store source_path, filename, indexed_at, and optionally a version_id (mtime/hash) to detect “same file new content”.
-Optional: near-duplicate detection (same paper different formatting) via SimHash/MinHash over cleaned text, but start with byte-hash first.
+Current baseline
+- Local PDF search prototype is working.
+- Core components already exist:
+  - local Qdrant collection
+  - content-based `doc_id`
+  - manifest-backed incremental skip logic
+  - batched embedding and batched upserts
+  - section-aware chunking
+  - `/search` and `/stats` API endpoints
+- Current observed repo state:
+  - 182 PDFs in `pdfs/`
+  - 178 unique indexed documents
+  - 4,929 indexed chunks
 
-3: Add delete/update endpoints + basic admin ops
-Endpoints or CLI commands:
-DELETE /docs/{doc_id} (delete by filter)
-POST /reindex (rebuild one doc)
-GET /stats (count points, docs, last index time)
+What needs the most attention next
 
-4: Speed up indexing (batch embedding)
-Encode chunks in batches: model.encode(chunks, batch_size=32, normalize_embeddings=True).
-Upsert in batches (e.g., 512–2048 points per call).
+1. Bring documentation in sync with the code
+- Current risk:
+  - repository docs still describe several already-completed limitations
+- Why it matters:
+  - future implementation decisions will be based on false assumptions
+  - review and planning become harder than necessary
+- Required changes:
+  - keep `TODO.txt` focused on remaining work only
+  - update `CONTEXT.md` to distinguish current behavior from planned server-mode features
+  - add a concise README with:
+    - setup
+    - indexing commands
+    - API usage
+    - known limitations
 
-5: Improve PDF text cleanup + chunking
-Dehyphenate line breaks (inter-\naction → interaction).
-Strip repeating headers/footers.
-Chunk by sentences/paragraphs with a token/char budget, not word count.
-Tag payload with section when detectable (“Abstract”, “Methods”, “References”).
+2. Make hybrid retrieval real, not just planned
+- Current state:
+  - lexical scoring and hybrid reranking helpers exist
+  - `/search` still performs dense retrieval only
+- Why it matters:
+  - scientific terms, abbreviations, assay names, genes, and units often need lexical support
+- Required changes:
+  - rerank dense candidates with the existing lexical signal
+  - optionally expose a query parameter to compare dense-only vs hybrid behavior
+  - evaluate result quality on a small set of real lab queries
 
-6: Hybrid retrieval (dense + lexical)
-Add BM25/sparse component and combine with dense vectors (huge win for gene names, IDs, units).
-Keep dense-only as fallback if needed.
+3. Add stronger search filters and result controls
+- Current state:
+  - search supports `doc_id` and `filename`
+- Why it matters:
+  - larger corpora will need tighter narrowing and more controllable output
+- Required changes:
+  - add `section` filtering
+  - add pagination or cursor-style result navigation
+  - return richer result metadata where useful:
+    - section
+    - total pages
+    - source path or a safer alias
+  - consider snippet windows that emphasize the matched part of a chunk
 
-7: Add metadata filters in search
-Support filters: filename, doc_id, year, section, page_range.
-Expose as query params (e.g., /search?q=...&doc_id=...&section=methods).
+4. Improve operational visibility
+- Current state:
+  - indexing prints basic timing totals
+  - search has a minimal `/stats` endpoint
+  - a local benchmark harness now exists for sample-based indexing and query throughput checks
+- Why it matters:
+  - without measurements, optimization work is guesswork
+- Required changes:
+  - log query latency, embedding latency, and Qdrant latency
+  - expose manifest status counts in `/stats` or a new admin endpoint
+  - extend the benchmark coverage to report:
+    - chunk count per document
+    - cold-start versus warm-start comparisons
+    - larger sample or full-corpus runs
 
-8: Add reranking
-Retrieve top ~50, rerank with a cross-encoder reranker, return top 10.
-Improves “the top result is close but not the answer” problem.
+5. Clean up text extraction and chunk quality
+- Current state:
+  - block cleanup and section normalization exist
+  - extraction is still vulnerable to PDF noise
+- Why it matters:
+  - low-value chunks increase index size and reduce precision
+- Required changes:
+  - better header/footer suppression
+  - more robust handling of references-heavy pages
+  - improved paragraph grouping for multi-column PDFs
+  - optional heuristics to down-rank or drop low-information chunks
 
-9: Return better context in results
-Return full chunk plus neighbors (prev/next chunk) or expand to ±N characters.
-Optional highlighting of query terms.
+6. Clarify local versus server Qdrant behavior
+- Current state:
+  - payload index creation is attempted
+  - local Qdrant warns that payload indexes have no effect
+- Why it matters:
+  - docs currently imply indexed filtering benefits that local mode does not provide
+- Required changes:
+  - document local-mode limitations clearly
+  - make Qdrant backend configurable
+  - support remote/self-hosted server mode without changing application code
+  - define backup and rebuild procedures
 
-10: Evaluation harness (so you can prove it’s better)
-Collect ~30 real lab queries + expected relevant passages.
-Track Recall@10 / MRR before vs after hybrid/rerank/chunking changes.
+7. Add focused validation coverage
+- Current gap:
+  - there is no lightweight automated check for ingest correctness or retrieval regressions
+- Why it matters:
+  - index behavior can silently drift as chunking and ingest logic evolve
+- Required changes:
+  - expand tests for:
+    - `doc_id` stability
+    - duplicate detection
+    - filter construction
+    - section-aware chunk boundaries on real extracted pages
+    - rename / remove / reindex behavior
+  - add a tiny regression query set for manual or scripted relevance checks
+
+Suggested execution order
+1. Hybrid retrieval in `/search`
+2. Documentation refresh
+3. Observability and benchmark harness
+4. Text cleanup improvements
+5. Remote/server Qdrant configuration
+6. Validation coverage
+
+Non-goals for now
+- multi-tenant auth
+- production-grade frontend work
+- distributed ingestion workers
+- expensive always-on reranking infrastructure

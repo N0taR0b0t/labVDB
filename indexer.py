@@ -1,344 +1,417 @@
-import pymupdf as fitz
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    VectorParams,
-    PointStruct,
-    Filter,
-    FieldCondition,
-    MatchValue,
-)
-from sentence_transformers import SentenceTransformer
-import os
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
 from pathlib import Path
-import hashlib
-import datetime
-import numpy as np
 import time
-import json
+from typing import NamedTuple
 
-# Initialize
-print("Loading embedding model...")
-model = SentenceTransformer('BAAI/bge-small-en-v1.5')
-print("Model loaded!")
+import pymupdf as fitz
+from qdrant_client.models import FilterSelector, PointStruct
 
-# Qdrant in local persistent storage (FIXED)
-client = QdrantClient(path="qdrant_storage")  # Remove the ./
+from labvdb import (
+    COLLECTION_NAME,
+    MODEL_NAME,
+    batched,
+    build_filter,
+    chunk_page_text,
+    compute_doc_id,
+    elapsed_seconds,
+    ensure_collection,
+    fetch_doc_ids,
+    get_client,
+    load_embedding_model,
+    load_manifest_entries,
+    make_chunk_id,
+    update_manifest_entry,
+)
 
-# Create collection
-collection_name = "pdfs"
-RESET_COLLECTION = os.getenv("RESET_COLLECTION", "0") == "1"
 
-BLACKLIST_PATH = Path("pdfs_blacklist.txt")
-MANIFEST_PATH = Path("indexer_manifest.json")
-SIM_THRESHOLD = 0.995  # strict duplicate threshold
+class IndexJob(NamedTuple):
+    pdf_path: Path
+    doc_id: str
+    size: int
+    mtime_ns: int
 
-def chunk_text(text, chunk_size=500, overlap=50):
-    """Split text into overlapping chunks"""
-    words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = ' '.join(words[i:i + chunk_size])
-        if chunk.strip():
-            chunks.append(chunk)
-    return chunks
 
-def sha1_file(path: Path, chunk_bytes: int = 1024 * 1024) -> str:
-    h = hashlib.sha1()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(chunk_bytes), b""):
-            h.update(block)
-    return h.hexdigest()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Index PDFs into local Qdrant storage.")
+    parser.add_argument("--pdf-dir", type=Path, default=Path("pdfs"))
+    parser.add_argument("--file", type=Path, action="append", default=[])
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--embed-batch-size", type=int, default=32)
+    parser.add_argument("--upsert-batch-size", type=int, default=512)
+    parser.add_argument("--delete-doc-id")
+    parser.add_argument("--verbose", action="store_true")
+    return parser.parse_args()
 
-def extract_full_text(pdf_path: Path) -> str:
-    doc = fitz.open(pdf_path)
-    texts = []
-    for page in doc:
-        txt = page.get_text()
-        if txt:
-            texts.append(txt)
-    doc.close()
-    return "\n".join(texts)
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    denom = np.linalg.norm(a) * np.linalg.norm(b)
-    if denom == 0:
-        return 0.0
-    return float(np.dot(a, b) / denom)
+def delete_document(client, doc_id: str) -> None:
+    doc_filter = build_filter(doc_id=doc_id)
+    if doc_filter is None:
+        raise ValueError("doc_id is required for deletion")
 
-def choose_file_to_blacklist(file1: Path, file2: Path) -> Path:
-    # Deterministic rule requested: blacklist alphabetically first, keep second.
-    ordered = sorted([file1, file2], key=lambda p: p.name.lower())
-    return ordered[0]
-
-def load_blacklist(path: Path) -> set[str]:
-    if not path.exists():
-        return set()
-    entries: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        entries.add(stripped)
-    return entries
-
-def save_blacklist(path: Path, entries: set[str]) -> None:
-    header = [
-        "# PDFs to ignore during indexing (one path per line).",
-        "# Auto-updated by indexer.py when duplicates are detected.",
-        f"# Updated: {datetime.datetime.now(datetime.UTC).isoformat()}",
-        "",
-    ]
-    body = sorted(entries, key=lambda s: s.lower())
-    path.write_text("\n".join(header + body) + "\n", encoding="utf-8")
-
-def load_manifest(path: Path) -> dict:
-    if not path.exists():
-        return {"version": 1, "files": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"version": 1, "files": {}}
-    if not isinstance(data, dict):
-        return {"version": 1, "files": {}}
-    if not isinstance(data.get("files"), dict):
-        data["files"] = {}
-    if "version" not in data:
-        data["version"] = 1
-    return data
-
-def save_manifest(path: Path, state: dict) -> None:
-    path.write_text(
-        json.dumps(state, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8"
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=FilterSelector(filter=doc_filter),
+        wait=True,
     )
 
-def doc_id_exists(doc_id: str) -> bool:
-    flt = Filter(
-        must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
-    )
-    points, _next = client.scroll(
-        collection_name=collection_name,
-        scroll_filter=flt,
-        limit=1,
-        with_payload=False,
-        with_vectors=False,
-    )
-    return len(points) > 0
 
-def make_point_id(doc_id: str, page_num: int, chunk_idx: int) -> int:
-    # Deterministic per-chunk ID; keep within signed 64-bit range.
-    digest = hashlib.md5(f"{doc_id}:{page_num}:{chunk_idx}".encode("utf-8")).hexdigest()
-    return int(digest[:16], 16) % (2**63 - 1)
+def resolve_pdf_paths(args: argparse.Namespace) -> list[Path]:
+    if args.file:
+        return sorted(path for path in args.file if path.suffix.lower() == ".pdf")
+    return sorted(args.pdf_dir.glob("*.pdf"))
 
-def index_pdf(pdf_path: str, doc_id: str):
-    """Extract text from PDF, chunk it, and index"""
-    print(f"\nIndexing: {pdf_path}")
-    doc = fitz.open(pdf_path)
-    filename = Path(pdf_path).name
-    
-    points = []
-    
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        text = page.get_text()
-        
-        if not text.strip():
-            continue
-            
-        chunks = chunk_text(text)
-        
-        for chunk_idx, chunk in enumerate(chunks):
-            # Embed the chunk
-            embedding = model.encode(chunk).tolist()
-            
-            # Create point
-            points.append(PointStruct(
-                id=make_point_id(doc_id=doc_id, page_num=page_num + 1, chunk_idx=chunk_idx),
-                vector=embedding,
-                payload={
-                    "doc_id": doc_id,
-                    "text": chunk,
-                    "filename": filename,
-                    "page": page_num + 1,
-                    "chunk_idx": chunk_idx
-                }
-            ))
-    
-    # Upload to Qdrant
-    if points:
-        client.upsert(collection_name=collection_name, points=points)
-        print(f"  ✓ Indexed {len(points)} chunks from {len(doc)} pages")
-    
-    doc.close()
 
-# Index all PDFs
-run_start = time.perf_counter()
+def plan_index_jobs(
+    *,
+    client,
+    pdf_paths: list[Path],
+    force: bool,
+) -> tuple[list[IndexJob], dict[str, object]]:
+    started_at = time.perf_counter()
+    manifest_entries = load_manifest_entries(pdf_paths)
+    existing_doc_ids = fetch_doc_ids(client)
 
-manifest = load_manifest(MANIFEST_PATH)
-manifest_files: dict[str, dict] = manifest["files"]
+    jobs: list[IndexJob] = []
+    skipped_existing: list[tuple[Path, str]] = []
+    skipped_duplicate_local: list[tuple[Path, str]] = []
+    replaced_doc_ids: list[tuple[Path, str, str]] = []
+    planned_doc_ids: set[str] = set()
+    metrics = {
+        "manifest_hits": 0,
+        "hash_computations": 0,
+        "hash_seconds": 0.0,
+    }
 
-collection_fresh = False
-if RESET_COLLECTION:
-    try:
-        client.delete_collection(collection_name=collection_name)
-        print(f"Deleted existing collection '{collection_name}'")
-    except Exception:
-        pass
-    client.create_collection(
-        collection_name=collection_name,
-        vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-    )
-    print(f"Created fresh collection '{collection_name}'")
-    collection_fresh = True
-else:
-    try:
-        client.get_collection(collection_name)
-        print(f"Collection '{collection_name}' already exists")
-    except Exception:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-        )
-        print(f"Created collection '{collection_name}'")
-        collection_fresh = True
+    for pdf_path in pdf_paths:
+        resolved_path = str(pdf_path.resolve())
+        stat = pdf_path.stat()
+        manifest_entry = manifest_entries.get(resolved_path)
+        previous_doc_id = manifest_entry.doc_id if manifest_entry and manifest_entry.doc_id else None
 
-if collection_fresh:
-    manifest_files.clear()
+        doc_id: str | None = None
+        if (
+            manifest_entry
+            and manifest_entry.size == stat.st_size
+            and manifest_entry.mtime_ns == stat.st_mtime_ns
+            and manifest_entry.doc_id
+        ):
+            doc_id = manifest_entry.doc_id
+            metrics["manifest_hits"] += 1
 
-pdf_dir = Path("pdfs")
-pdf_files = sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name.lower())
+        if doc_id is None:
+            hash_started = time.perf_counter()
+            doc_id = compute_doc_id(pdf_path)
+            metrics["hash_seconds"] += elapsed_seconds(hash_started)
+            metrics["hash_computations"] += 1
 
-if not pdf_files:
-    print("No PDFs found in 'pdfs/' directory!")
-    exit(1)
-
-print(f"\nFound {len(pdf_files)} PDFs to index")
-
-existing_blacklist = load_blacklist(BLACKLIST_PATH)
-auto_blacklist: set[str] = set(existing_blacklist)
-
-pdf_paths = {p.as_posix() for p in pdf_files}
-stale_manifest_paths = [p for p in manifest_files.keys() if p not in pdf_paths]
-for stale in stale_manifest_paths:
-    del manifest_files[stale]
-
-file_stats: dict[str, tuple[int, int]] = {}
-candidate_files: list[Path] = []
-candidate_paths: set[str] = set()
-skipped_unchanged = 0
-for pdf_file in pdf_files:
-    pdf_path = pdf_file.as_posix()
-    stat = pdf_file.stat()
-    file_stats[pdf_path] = (int(stat.st_size), int(stat.st_mtime_ns))
-    prev = manifest_files.get(pdf_path)
-    unchanged = (
-        isinstance(prev, dict)
-        and prev.get("size") == file_stats[pdf_path][0]
-        and prev.get("mtime_ns") == file_stats[pdf_path][1]
-    )
-    if unchanged and prev.get("status") in {"indexed", "skipped_doc_id_exists"}:
-        skipped_unchanged += 1
-        continue
-    candidate_files.append(pdf_file)
-    candidate_paths.add(pdf_path)
-
-print(f"Unchanged files skipped from reprocessing: {skipped_unchanged}")
-print(f"Files to process this run: {len(candidate_files)}")
-
-# Semantic near-duplicate detection only for new/changed files.
-doc_embeddings: dict[Path, np.ndarray] = {}
-for pdf_file in candidate_files:
-    if pdf_file.as_posix() in auto_blacklist:
-        continue
-    print(f"Computing doc embedding: {pdf_file.name}")
-    full_text = extract_full_text(pdf_file)
-    doc_embeddings[pdf_file] = model.encode(full_text)
-
-for i, file1 in enumerate(candidate_files):
-    if file1.as_posix() in auto_blacklist or file1 not in doc_embeddings:
-        continue
-    for j in range(i + 1, len(candidate_files)):
-        file2 = candidate_files[j]
-        if file2.as_posix() in auto_blacklist or file2 not in doc_embeddings:
-            continue
-        sim = cosine_similarity(doc_embeddings[file1], doc_embeddings[file2])
-        if sim >= SIM_THRESHOLD:
-            to_blacklist = choose_file_to_blacklist(file1, file2)
-            kept = file2 if to_blacklist == file1 else file1
-            print(
-                f"Detected near-duplicate (sim={sim:.6f}): "
-                f"keeping {kept.name}, blacklisting {to_blacklist.name}"
+        if doc_id in planned_doc_ids:
+            skipped_duplicate_local.append((pdf_path, doc_id))
+            update_manifest_entry(
+                path=pdf_path,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                doc_id=doc_id,
+                indexed_at=None,
+                status="duplicate_local",
+                last_error=None,
             )
-            auto_blacklist.add(to_blacklist.as_posix())
+            continue
 
-if auto_blacklist != existing_blacklist:
-    save_blacklist(BLACKLIST_PATH, auto_blacklist)
-    newly_added = len(auto_blacklist) - len(existing_blacklist)
-    if newly_added > 0:
-        print(f"Added {newly_added} duplicate PDF(s) to {BLACKLIST_PATH}")
+        if previous_doc_id and previous_doc_id != doc_id and previous_doc_id in existing_doc_ids:
+            delete_document(client, previous_doc_id)
+            existing_doc_ids.discard(previous_doc_id)
+            replaced_doc_ids.append((pdf_path, previous_doc_id, doc_id))
 
-processed_files = 0
-skipped_doc_id = 0
+        if doc_id in existing_doc_ids:
+            if force:
+                delete_document(client, doc_id)
+                existing_doc_ids.discard(doc_id)
+            else:
+                skipped_existing.append((pdf_path, doc_id))
+                update_manifest_entry(
+                    path=pdf_path,
+                    size=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                    doc_id=doc_id,
+                    indexed_at=datetime.now(timezone.utc).isoformat(),
+                    status="indexed",
+                    last_error=None,
+                )
+                continue
 
-for pdf_file in pdf_files:
+        jobs.append(
+            IndexJob(
+                pdf_path=pdf_path,
+                doc_id=doc_id,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+            )
+        )
+        planned_doc_ids.add(doc_id)
+
+    metrics["plan_seconds"] = elapsed_seconds(started_at)
+    return jobs, {
+        "skipped_existing": skipped_existing,
+        "skipped_duplicate_local": skipped_duplicate_local,
+        "replaced_doc_ids": replaced_doc_ids,
+        "metrics": metrics,
+    }
+
+
+def flush_records(
+    *,
+    client,
+    model,
+    pending_records: list[tuple[int, int, str, str]],
+    upsert_batch_size: int,
+    metadata: dict[str, object],
+    stats: dict[str, float],
+    embed_batch_size: int,
+) -> None:
+    if not pending_records:
+        return
+
+    texts = [record[3] for record in pending_records]
+    embed_started = time.perf_counter()
+    embeddings = model.encode(
+        texts,
+        batch_size=embed_batch_size,
+        normalize_embeddings=True,
+    )
+    stats["embed_seconds"] += elapsed_seconds(embed_started)
+
+    points = []
+    for (page_num, chunk_idx, section, text), embedding in zip(pending_records, embeddings):
+        points.append(
+            PointStruct(
+                id=make_chunk_id(metadata["doc_id"], page_num, chunk_idx),
+                vector=embedding.tolist(),
+                payload={
+                    **metadata,
+                    "page": page_num,
+                    "chunk_idx": chunk_idx,
+                    "section": section,
+                    "text": text,
+                },
+            )
+        )
+
+    upsert_started = time.perf_counter()
+    for point_batch in batched(points, upsert_batch_size):
+        client.upsert(collection_name=COLLECTION_NAME, points=point_batch, wait=True)
+        stats["upsert_batches"] += 1
+    stats["upsert_seconds"] += elapsed_seconds(upsert_started)
+
+    stats["chunks_indexed"] += len(points)
+    pending_records.clear()
+
+
+def index_pdf(
+    *,
+    client,
+    model,
+    job: IndexJob,
+    embed_batch_size: int,
+    upsert_batch_size: int,
+) -> tuple[dict[str, float], str]:
+    doc_started = time.perf_counter()
+    doc = fitz.open(job.pdf_path)
+    indexed_at = datetime.now(timezone.utc).isoformat()
+    metadata = {
+        "doc_id": job.doc_id,
+        "filename": job.pdf_path.name,
+        "source_path": str(job.pdf_path.resolve()),
+        "indexed_at": indexed_at,
+        "total_pages": len(doc),
+    }
+
+    stats: dict[str, float] = {
+        "chunks_indexed": 0,
+        "pages_indexed": 0,
+        "extract_seconds": 0.0,
+        "embed_seconds": 0.0,
+        "upsert_seconds": 0.0,
+        "upsert_batches": 0,
+    }
+    pending_records: list[tuple[int, int, str, str]] = []
+
     try:
-        pdf_path = pdf_file.as_posix()
-        size, mtime_ns = file_stats[pdf_path]
+        for page_num in range(len(doc)):
+            extract_started = time.perf_counter()
+            chunks = chunk_page_text(doc[page_num], page_num + 1)
+            stats["extract_seconds"] += elapsed_seconds(extract_started)
+            if not chunks:
+                continue
 
-        if pdf_file.as_posix() in auto_blacklist:
-            print(f"\nSkipping blacklisted PDF: {pdf_file}")
-            manifest_files[pdf_path] = {
-                "status": "blacklisted",
-                "size": size,
-                "mtime_ns": mtime_ns,
-                "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            }
-            continue
+            stats["pages_indexed"] += 1
+            for chunk in chunks:
+                pending_records.append(
+                    (chunk.page, chunk.chunk_idx, chunk.section, chunk.text)
+                )
+                if len(pending_records) >= embed_batch_size:
+                    flush_records(
+                        client=client,
+                        model=model,
+                        pending_records=pending_records,
+                        upsert_batch_size=upsert_batch_size,
+                        metadata=metadata,
+                        stats=stats,
+                        embed_batch_size=embed_batch_size,
+                    )
 
-        if pdf_path not in candidate_paths:
-            continue
+        flush_records(
+            client=client,
+            model=model,
+            pending_records=pending_records,
+            upsert_batch_size=upsert_batch_size,
+            metadata=metadata,
+            stats=stats,
+            embed_batch_size=embed_batch_size,
+        )
+    finally:
+        doc.close()
 
-        doc_id = sha1_file(pdf_file)
-        if doc_id_exists(doc_id):
-            print(f"\nSkipping already-indexed PDF (doc_id match): {pdf_file}")
-            skipped_doc_id += 1
-            manifest_files[pdf_path] = {
-                "status": "skipped_doc_id_exists",
-                "doc_id": doc_id,
-                "size": size,
-                "mtime_ns": mtime_ns,
-                "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            }
-            continue
-        index_pdf(str(pdf_file), doc_id=doc_id)
-        processed_files += 1
-        manifest_files[pdf_path] = {
-            "status": "indexed",
-            "doc_id": doc_id,
-            "size": size,
-            "mtime_ns": mtime_ns,
-            "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        }
-    except Exception as e:
-        print(f"  ✗ Error indexing {pdf_file}: {e}")
-        pdf_path = pdf_file.as_posix()
-        size, mtime_ns = file_stats.get(pdf_path, (0, 0))
-        manifest_files[pdf_path] = {
-            "status": "error",
-            "size": size,
-            "mtime_ns": mtime_ns,
-            "error": str(e),
-            "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        }
+    stats["doc_seconds"] = elapsed_seconds(doc_started)
+    update_manifest_entry(
+        path=job.pdf_path,
+        size=job.size,
+        mtime_ns=job.mtime_ns,
+        doc_id=job.doc_id,
+        indexed_at=indexed_at,
+        status="indexed",
+        last_error=None,
+    )
+    return stats, indexed_at
 
-save_manifest(MANIFEST_PATH, manifest)
-print("\n✅ Indexing complete!")
-print(f"Total points in collection: {client.count(collection_name).count}")
-elapsed = time.perf_counter() - run_start
-time_per_file = elapsed / processed_files if processed_files > 0 else 0.0
-print(f"Elapsed time (s): {elapsed:.2f}")
-print(f"Files processed: {processed_files}")
-print(f"Skipped (unchanged): {skipped_unchanged}")
-print(f"Skipped (already indexed doc_id): {skipped_doc_id}")
-print(f"Time per file (s): {time_per_file:.2f}")
+
+def print_summary(summary: dict[str, float], metrics: dict[str, float]) -> None:
+    total_points = int(summary["total_points"])
+    print(
+        "Indexing complete: "
+        f"{int(summary['indexed'])} indexed, "
+        f"{int(summary['skipped_existing'])} already indexed, "
+        f"{int(summary['skipped_duplicate_local'])} duplicate local, "
+        f"{int(summary['failed'])} failed, "
+        f"{total_points} total points"
+    )
+    print(
+        "Metrics: "
+        f"plan={metrics['plan_seconds']:.2f}s, "
+        f"hash={metrics['hash_seconds']:.2f}s ({int(metrics['hash_computations'])} files), "
+        f"embed={summary['embed_seconds']:.2f}s, "
+        f"extract={summary['extract_seconds']:.2f}s, "
+        f"upsert={summary['upsert_seconds']:.2f}s, "
+        f"docs/sec={summary['indexed'] / max(summary['total_seconds'], 1e-9):.2f}, "
+        f"chunks/sec={summary['chunks_indexed'] / max(summary['total_seconds'], 1e-9):.2f}"
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    if args.embed_batch_size <= 0 or args.upsert_batch_size <= 0:
+        raise ValueError("Batch sizes must be positive integers")
+
+    overall_started = time.perf_counter()
+    client = get_client()
+    ensure_collection(client)
+
+    if args.delete_doc_id:
+        delete_document(client, args.delete_doc_id)
+        print(f"Deleted document {args.delete_doc_id}")
+        return
+
+    pdf_paths = resolve_pdf_paths(args)
+    if not pdf_paths:
+        raise SystemExit("No PDFs found to index.")
+
+    jobs, planning = plan_index_jobs(client=client, pdf_paths=pdf_paths, force=args.force)
+    skipped_existing = planning["skipped_existing"]
+    skipped_duplicate_local = planning["skipped_duplicate_local"]
+    replaced_doc_ids = planning["replaced_doc_ids"]
+    metrics = planning["metrics"]
+
+    if skipped_existing:
+        if args.verbose:
+            for pdf_path, doc_id in skipped_existing:
+                print(f"Skipped {pdf_path.name}: doc_id {doc_id} already indexed")
+        else:
+            print(f"Skipped {len(skipped_existing)} already indexed files")
+
+    if skipped_duplicate_local:
+        if args.verbose:
+            for pdf_path, doc_id in skipped_duplicate_local:
+                print(f"Skipped {pdf_path.name}: duplicate local doc_id {doc_id}")
+        else:
+            print(f"Skipped {len(skipped_duplicate_local)} duplicate local files")
+
+    if replaced_doc_ids:
+        if args.verbose:
+            for pdf_path, previous_doc_id, doc_id in replaced_doc_ids:
+                print(
+                    f"Replacing {pdf_path.name}: removed stale doc_id {previous_doc_id} "
+                    f"before indexing {doc_id}"
+                )
+        else:
+            print(f"Replacing {len(replaced_doc_ids)} changed files with new doc_ids")
+
+    model = None
+    if jobs:
+        print(f"Loading embedding model: {MODEL_NAME}")
+        model = load_embedding_model(MODEL_NAME)
+
+    summary = {
+        "indexed": 0,
+        "skipped_existing": float(len(skipped_existing)),
+        "skipped_duplicate_local": float(len(skipped_duplicate_local)),
+        "failed": 0,
+        "chunks_indexed": 0.0,
+        "extract_seconds": 0.0,
+        "embed_seconds": 0.0,
+        "upsert_seconds": 0.0,
+    }
+
+    for job in jobs:
+        try:
+            job_stats, _ = index_pdf(
+                client=client,
+                model=model,
+                job=job,
+                embed_batch_size=args.embed_batch_size,
+                upsert_batch_size=args.upsert_batch_size,
+            )
+            summary["indexed"] += 1
+            summary["chunks_indexed"] += job_stats["chunks_indexed"]
+            summary["extract_seconds"] += job_stats["extract_seconds"]
+            summary["embed_seconds"] += job_stats["embed_seconds"]
+            summary["upsert_seconds"] += job_stats["upsert_seconds"]
+            print(
+                f"Indexed {job.pdf_path.name}: "
+                f"{int(job_stats['chunks_indexed'])} chunks, "
+                f"{int(job_stats['pages_indexed'])} pages, "
+                f"section-aware chunks in {job_stats['doc_seconds']:.2f}s"
+            )
+        except Exception as exc:
+            summary["failed"] += 1
+            update_manifest_entry(
+                path=job.pdf_path,
+                size=job.size,
+                mtime_ns=job.mtime_ns,
+                doc_id=job.doc_id,
+                indexed_at=None,
+                status="failed",
+                last_error=str(exc),
+            )
+            print(f"Failed {job.pdf_path}: {exc}")
+
+    summary["total_points"] = float(
+        client.count(collection_name=COLLECTION_NAME, exact=False).count
+    )
+    summary["total_seconds"] = elapsed_seconds(overall_started)
+    print_summary(summary, metrics)
+
+
+if __name__ == "__main__":
+    main()
