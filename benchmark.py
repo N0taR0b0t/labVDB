@@ -191,6 +191,7 @@ def main() -> None:
     queries = args.query or list(DEFAULT_QUERIES)
 
     temp_root = Path(tempfile.mkdtemp(prefix="labvdb-bench-"))
+    client = None
 
     try:
         configure_paths(temp_root)
@@ -252,6 +253,8 @@ def main() -> None:
         print(f"  throughput: {queries_summary['queries_per_second']:.2f} queries/s")
 
     finally:
+        if client is not None:
+            client.close()
         if not args.keep_artifacts:
             shutil.rmtree(temp_root, ignore_errors=True)
         else:

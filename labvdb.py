@@ -117,12 +117,27 @@ def model_is_cached(model_name: str = MODEL_NAME) -> bool:
     return (snapshots_dir / revision).is_dir()
 
 
+def cached_model_snapshot_path(model_name: str = MODEL_NAME) -> Path | None:
+    cache_dir = model_cache_path(model_name)
+    refs_main = cache_dir / "refs" / "main"
+    snapshots_dir = cache_dir / "snapshots"
+    if not refs_main.exists() or not snapshots_dir.exists():
+        return None
+
+    revision = refs_main.read_text().strip()
+    snapshot_path = snapshots_dir / revision
+    if not snapshot_path.is_dir():
+        return None
+    return snapshot_path
+
+
 @functools.lru_cache(maxsize=1)
 def load_embedding_model(model_name: str = MODEL_NAME):
     from sentence_transformers import SentenceTransformer
 
-    if model_is_cached(model_name):
-        return SentenceTransformer(model_name, local_files_only=True)
+    cached_snapshot = cached_model_snapshot_path(model_name)
+    if cached_snapshot is not None:
+        return SentenceTransformer(str(cached_snapshot))
 
     try:
         return SentenceTransformer(model_name)
