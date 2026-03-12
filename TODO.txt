@@ -3,12 +3,17 @@ labVDB prioritized TODO
 Current baseline
 - Local PDF search prototype is working.
 - Core components already exist:
-  - local Qdrant collection
+  - server Qdrant support via QDRANT_URL env var (Phase 1 complete)
+  - scalar quantization + on_disk_payload on collection creation (Phase 1 complete)
+  - lifespan-managed client in search_api; /health endpoint (Phase 1 complete)
+  - manifest-authoritative indexing planner — no Qdrant scroll (Phase 2 complete)
+  - count_indexed_docs() for /stats — SQLite only, no scroll (Phase 2 complete)
+  - --reconcile CLI command for repair (Phase 2 complete)
   - content-based `doc_id`
-  - manifest-backed incremental skip logic
   - batched embedding and batched upserts
   - section-aware chunking
-  - `/search` and `/stats` API endpoints
+  - `/search`, `/stats`, `/health` API endpoints
+  - docker-compose.yml for Qdrant server deployment
 - Current observed repo state:
   - 182 PDFs in `pdfs/`
   - 178 unique indexed documents
@@ -83,19 +88,7 @@ What needs the most attention next
   - improved paragraph grouping for multi-column PDFs
   - optional heuristics to down-rank or drop low-information chunks
 
-6. Clarify local versus server Qdrant behavior
-- Current state:
-  - payload index creation is attempted
-  - local Qdrant warns that payload indexes have no effect
-- Why it matters:
-  - docs currently imply indexed filtering benefits that local mode does not provide
-- Required changes:
-  - document local-mode limitations clearly
-  - make Qdrant backend configurable
-  - support remote/self-hosted server mode without changing application code
-  - define backup and rebuild procedures
-
-7. Add focused validation coverage
+6. Add focused validation coverage
 - Current gap:
   - there is no lightweight automated check for ingest correctness or retrieval regressions
 - Why it matters:
@@ -109,13 +102,52 @@ What needs the most attention next
     - rename / remove / reindex behavior
   - add a tiny regression query set for manual or scripted relevance checks
 
+Architecture pivot — scaling to ~20,000 PDFs
+
+The following phases implement the core design change: Qdrant for vector search only,
+SQLite manifest as authority, SQLite chunk store for full text.
+
+Critical phases (prerequisite for scaling):
+
+Phase 1 — Deploy server Qdrant [COMPLETE]
+- DONE: QdrantClient(url=QDRANT_URL) when env var set, embedded fallback otherwise
+- DONE: scalar quantization + on_disk_payload on collection creation
+- DONE: UnexpectedResponse 400 silenced in ensure_payload_indexes(); 5xx propagates
+- DONE: lifespan-managed client; no import-time Qdrant calls
+- DONE: /health endpoint; docker-compose.yml; .env.example
+
+Phase 2 — Make manifest authoritative, remove collection scans [COMPLETE]
+- DONE: plan_index_jobs() uses manifest for skip/change detection; no fetch_doc_ids() call
+- DONE: changed-file delete fires unconditionally (Qdrant no-op if absent)
+- DONE: count_indexed_docs() replaces count_unique_doc_ids() in /stats
+- DONE: --reconcile CLI command (single scroll, read-only, maintenance only)
+- DONE: pymupdf import deferred; planner is importable without PDF library
+
+Phase 3 — Move full chunk text out of Qdrant payloads
+- Store only doc_id, filename, page, chunk_idx, section, short preview in Qdrant
+- Store full chunk text in a new SQLite chunk table keyed by chunk_id
+- Fetch full text from SQLite only for selected results
+
+Supplemental phase (improves perceived speed; not required for scaling):
+
+Phase 4 — Progressive result loading and UI filters
+- Return only filename, page, section, snippet, and score in initial search response
+- Load full chunk text on demand when the user opens a result
+- Add UI filters for filename, document, and section
+
+Migration note: switching to server Qdrant requires a full re-index. Run indexer.py --force
+after deploying Phase 1. The manifest tracks all state needed for the re-index pass.
+
 Suggested execution order
-1. Hybrid retrieval in `/search`
-2. Documentation refresh
-3. Observability and benchmark harness
-4. Text cleanup improvements
-5. Remote/server Qdrant configuration
-6. Validation coverage
+1. ~~Phase 1 — server Qdrant~~ COMPLETE
+2. ~~Phase 2 — manifest authority~~ COMPLETE
+3. Phase 3 — chunk text to SQLite (reduces Qdrant storage and payload overhead)
+4. Hybrid retrieval in `/search`
+5. Documentation refresh
+6. Phase 4 — progressive loading (supplemental UX improvement)
+7. Observability and benchmark harness
+8. Text cleanup improvements
+9. Validation coverage
 
 Non-goals for now
 - multi-tenant auth

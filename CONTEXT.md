@@ -136,6 +136,46 @@ Under a strict cost cap, the strongest path is usually:
 - Model loading should be lazy and cache-aware.
 - Index planning should avoid unnecessary repeated database checks.
 
+## Planned Architecture Pivot for Scale
+
+The system is being redesigned for reliable operation at ~20,000 PDFs on a single low-cost machine.
+
+### Core design change
+
+Stop treating Qdrant as both the search engine and the system-of-record.
+
+| Component | Role |
+|-----------|------|
+| Qdrant server | vector search only |
+| SQLite manifest DB | document inventory, indexing state, file change tracking, stats |
+| SQLite chunk store | full chunk text storage |
+
+### Implementation phases
+
+#### Critical (must complete before scaling)
+
+**Phase 1 — Deploy server Qdrant with disk-backed operation**
+
+Move from embedded local mode (`QdrantClient(path=...)`) to a standalone Qdrant server or Docker container (`QdrantClient(url=...)`). Configure on-disk vectors, on-disk HNSW, scalar quantization, and persistent SSD storage. Target: 8 GB RAM machine with SSD mandatory.
+
+**Phase 2 — Make the manifest authoritative; eliminate whole-collection scans**
+
+Treat `manifest.sqlite3` as the sole source of truth for which PDFs are known, whether a PDF changed, and whether it was indexed successfully. Remove Qdrant-wide scroll scans from the indexing planner and stats endpoint. Use `(path, size, mtime_ns, hash optional)` to detect file changes. A manual reconcile command should exist for repair, not as the normal code path.
+
+**Phase 3 — Remove full chunk text from Qdrant payloads**
+
+Store only lightweight search payload in Qdrant: `doc_id`, `filename`, `page`, `chunk_idx`, `section`, and a short preview. Store full chunk text in a separate SQLite chunk table keyed by `chunk_id`. The API fetches full text only for selected results when needed.
+
+#### Supplemental (improves perceived speed; not a prerequisite for scaling)
+
+**Phase 4 — Progressive result loading and UI filters**
+
+Return only `filename`, `page`, `section`, short snippet, and score in the initial search response. Load full chunk text only when the user opens a result. Add fast filters in the UI for filename, document, and section.
+
+### Migration note
+
+Switching from embedded to server Qdrant requires a full re-index pass. The manifest tracks all files and their statuses, so `indexer.py --force` after deploying the new code is the migration path. No data migration from the embedded store is needed.
+
 ## Success Criteria
 
 This project is on the right track if it becomes:

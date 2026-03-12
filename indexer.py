@@ -6,7 +6,6 @@ from pathlib import Path
 import time
 from typing import NamedTuple
 
-import pymupdf as fitz
 from qdrant_client.models import FilterSelector, PointStruct
 
 from labvdb import (
@@ -18,7 +17,7 @@ from labvdb import (
     compute_doc_id,
     elapsed_seconds,
     ensure_collection,
-    fetch_doc_ids,
+    fetch_doc_ids,  # used by --reconcile only
     get_client,
     load_embedding_model,
     load_manifest_entries,
@@ -42,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embed-batch-size", type=int, default=32)
     parser.add_argument("--upsert-batch-size", type=int, default=512)
     parser.add_argument("--delete-doc-id")
+    parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Compare manifest against Qdrant and report gaps. Read-only repair aid.",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
@@ -72,7 +76,6 @@ def plan_index_jobs(
 ) -> tuple[list[IndexJob], dict[str, object]]:
     started_at = time.perf_counter()
     manifest_entries = load_manifest_entries(pdf_paths)
-    existing_doc_ids = fetch_doc_ids(client)
 
     jobs: list[IndexJob] = []
     skipped_existing: list[tuple[Path, str]] = []
@@ -91,6 +94,7 @@ def plan_index_jobs(
         manifest_entry = manifest_entries.get(resolved_path)
         previous_doc_id = manifest_entry.doc_id if manifest_entry and manifest_entry.doc_id else None
 
+        # Resolve doc_id: use manifest cache when size+mtime match, else hash the file.
         doc_id: str | None = None
         if (
             manifest_entry
@@ -107,6 +111,7 @@ def plan_index_jobs(
             metrics["hash_seconds"] += elapsed_seconds(hash_started)
             metrics["hash_computations"] += 1
 
+        # Dedup within this batch.
         if doc_id in planned_doc_ids:
             skipped_duplicate_local.append((pdf_path, doc_id))
             update_manifest_entry(
@@ -120,27 +125,27 @@ def plan_index_jobs(
             )
             continue
 
-        if previous_doc_id and previous_doc_id != doc_id and previous_doc_id in existing_doc_ids:
+        # File changed: old doc_id differs from current. Delete the stale vectors.
+        # Qdrant delete on a non-existent filter is a safe no-op.
+        if previous_doc_id and previous_doc_id != doc_id:
             delete_document(client, previous_doc_id)
-            existing_doc_ids.discard(previous_doc_id)
             replaced_doc_ids.append((pdf_path, previous_doc_id, doc_id))
 
-        if doc_id in existing_doc_ids:
-            if force:
-                delete_document(client, doc_id)
-                existing_doc_ids.discard(doc_id)
-            else:
-                skipped_existing.append((pdf_path, doc_id))
-                update_manifest_entry(
-                    path=pdf_path,
-                    size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    doc_id=doc_id,
-                    indexed_at=datetime.now(timezone.utc).isoformat(),
-                    status="indexed",
-                    last_error=None,
-                )
-                continue
+        # Manifest says this file is already indexed with the current doc_id — skip unless forced.
+        manifest_already_indexed = (
+            manifest_entry is not None
+            and manifest_entry.status == "indexed"
+            and manifest_entry.doc_id == doc_id
+            and manifest_entry.size == stat.st_size
+            and manifest_entry.mtime_ns == stat.st_mtime_ns
+        )
+        if manifest_already_indexed and not force:
+            skipped_existing.append((pdf_path, doc_id))
+            continue
+
+        # --force: delete existing vectors before re-indexing.
+        if force and manifest_already_indexed:
+            delete_document(client, doc_id)
 
         jobs.append(
             IndexJob(
@@ -217,6 +222,7 @@ def index_pdf(
     embed_batch_size: int,
     upsert_batch_size: int,
 ) -> tuple[dict[str, float], str]:
+    import pymupdf as fitz  # deferred: not needed for planning or manifest operations
     doc_started = time.perf_counter()
     doc = fitz.open(job.pdf_path)
     indexed_at = datetime.now(timezone.utc).isoformat()
@@ -309,6 +315,40 @@ def print_summary(summary: dict[str, float], metrics: dict[str, float]) -> None:
     )
 
 
+def reconcile(client) -> None:
+    """Compare manifest (indexed status) against Qdrant. Print gaps. Read-only."""
+    from labvdb import manifest_stats
+
+    print("Reconcile: scanning Qdrant (this is the only full scroll — maintenance use only)...")
+    qdrant_doc_ids = fetch_doc_ids(client)
+
+    with __import__("sqlite3").connect(__import__("labvdb").MANIFEST_PATH) as conn:
+        rows = conn.execute(
+            "SELECT doc_id FROM manifest WHERE status = 'indexed' AND doc_id IS NOT NULL"
+        ).fetchall()
+    manifest_doc_ids = {row[0] for row in rows}
+
+    in_qdrant_not_manifest = qdrant_doc_ids - manifest_doc_ids
+    in_manifest_not_qdrant = manifest_doc_ids - qdrant_doc_ids
+
+    print(f"Qdrant unique doc_ids:   {len(qdrant_doc_ids)}")
+    print(f"Manifest indexed doc_ids: {len(manifest_doc_ids)}")
+
+    if in_qdrant_not_manifest:
+        print(f"\nIn Qdrant but NOT in manifest ({len(in_qdrant_not_manifest)}):")
+        for doc_id in sorted(in_qdrant_not_manifest):
+            print(f"  {doc_id}")
+    else:
+        print("\nNo doc_ids in Qdrant without a manifest entry.")
+
+    if in_manifest_not_qdrant:
+        print(f"\nIn manifest but NOT in Qdrant ({len(in_manifest_not_qdrant)}) — re-index these:")
+        for doc_id in sorted(in_manifest_not_qdrant):
+            print(f"  {doc_id}")
+    else:
+        print("No manifest entries missing from Qdrant.")
+
+
 def main() -> None:
     args = parse_args()
     if args.embed_batch_size <= 0 or args.upsert_batch_size <= 0:
@@ -317,6 +357,10 @@ def main() -> None:
     overall_started = time.perf_counter()
     client = get_client()
     ensure_collection(client)
+
+    if args.reconcile:
+        reconcile(client)
+        return
 
     if args.delete_doc_id:
         delete_document(client, args.delete_doc_id)

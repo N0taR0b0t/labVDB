@@ -45,16 +45,17 @@ class IndexPlanningTests(unittest.TestCase):
             pdf_path = Path(tmp_dir) / "paper.pdf"
             pdf_path.write_bytes(b"new content")
             stat = pdf_path.stat()
+            from labvdb import ManifestEntry
             manifest_entry = {
-                str(pdf_path.resolve()): type(
-                    "ManifestEntryStub",
-                    (),
-                    {
-                        "size": stat.st_size - 1,
-                        "mtime_ns": stat.st_mtime_ns - 1,
-                        "doc_id": "old-doc",
-                    },
-                )()
+                str(pdf_path.resolve()): ManifestEntry(
+                    path=str(pdf_path.resolve()),
+                    size=stat.st_size - 1,
+                    mtime_ns=stat.st_mtime_ns - 1,
+                    doc_id="old-doc",
+                    indexed_at="2026-01-01T00:00:00+00:00",
+                    status="indexed",
+                    last_error=None,
+                )
             }
 
             deleted_doc_ids: list[str] = []
@@ -64,7 +65,6 @@ class IndexPlanningTests(unittest.TestCase):
 
             with (
                 patch("indexer.load_manifest_entries", return_value=manifest_entry),
-                patch("indexer.fetch_doc_ids", return_value={"old-doc"}),
                 patch("indexer.compute_doc_id", return_value="new-doc"),
                 patch("indexer.update_manifest_entry"),
                 patch("indexer.delete_document", side_effect=fake_delete_document),

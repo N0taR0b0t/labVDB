@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import math
+import os
 import re
 import sqlite3
 import time
@@ -12,14 +14,20 @@ from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
     MatchValue,
     PayloadSchemaType,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
     VectorParams,
 )
+
+logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "pdfs"
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -66,16 +74,33 @@ class ChunkRecord:
 
 
 def get_client() -> QdrantClient:
+    qdrant_url = os.environ.get("QDRANT_URL")
+    if qdrant_url:
+        return QdrantClient(url=qdrant_url)
     return QdrantClient(path=QDRANT_PATH)
 
 
 def ensure_collection(client: QdrantClient) -> None:
     try:
-        client.get_collection(COLLECTION_NAME)
+        collection = client.get_collection(COLLECTION_NAME)
+        if collection.config.quantization_config is None:
+            logger.warning(
+                "Collection '%s' exists but has no quantization config. "
+                "Consider recreating it with scalar quantization for better performance at scale.",
+                COLLECTION_NAME,
+            )
     except Exception:
         client.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+            on_disk_payload=True,
+            quantization_config=ScalarQuantization(
+                scalar=ScalarQuantizationConfig(
+                    type=ScalarType.INT8,
+                    quantile=0.99,
+                    always_ram=False,
+                )
+            ),
         )
 
     ensure_payload_indexes(client)
@@ -97,8 +122,11 @@ def ensure_payload_indexes(client: QdrantClient) -> None:
                 field_schema=schema,
                 wait=True,
             )
-        except Exception:
-            continue
+        except UnexpectedResponse as exc:
+            # 400 means the index already exists — that's fine.
+            # Anything else (5xx, permission errors, etc.) is a real problem.
+            if exc.status_code != 400:
+                raise
 
 
 def model_cache_path(model_name: str = MODEL_NAME) -> Path:
@@ -236,6 +264,15 @@ def update_manifest_entry(
             ),
         )
         conn.commit()
+
+
+def count_indexed_docs() -> int:
+    ensure_manifest_db()
+    with sqlite3.connect(MANIFEST_PATH) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM manifest WHERE status = 'indexed'"
+        ).fetchone()
+    return row[0] if row else 0
 
 
 def manifest_stats() -> dict[str, int]:

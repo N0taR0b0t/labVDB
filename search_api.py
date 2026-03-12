@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 import uvicorn
 
@@ -8,25 +10,41 @@ from labvdb import (
     COLLECTION_NAME,
     MODEL_NAME,
     build_filter,
-    count_unique_doc_ids,
+    count_indexed_docs,
+    count_unique_doc_ids,  # retained for reconcile; not called during normal operation
     ensure_collection,
     get_client,
     load_embedding_model,
 )
 
-client = get_client()
-ensure_collection(client)
 
-app = FastAPI(title="PDF Search")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    client = get_client()
+    ensure_collection(client)
+    app.state.client = client
+    yield
+    # Nothing to explicitly close for either embedded or server client.
+
+
+app = FastAPI(title="PDF Search", lifespan=lifespan)
+
+
+@app.get("/health")
+def health(request: Request):
+    request.app.state.client.get_collections()
+    return {"status": "ok"}
 
 
 @app.get("/search")
 def search(
+    request: Request,
     q: str = Query(..., description="Search query", min_length=1),
     limit: int = Query(10, ge=1, le=50),
     doc_id: str | None = Query(None, description="Restrict results to one document"),
     filename: str | None = Query(None, description="Restrict results to one filename"),
 ):
+    client = request.app.state.client
     model = load_embedding_model(MODEL_NAME)
     query_vector = model.encode(q, normalize_embeddings=True).tolist()
     search_filter = build_filter(doc_id=doc_id, filename=filename)
@@ -60,12 +78,13 @@ def search(
 
 
 @app.get("/stats")
-def stats():
+def stats(request: Request):
+    client = request.app.state.client
     point_count = client.count(collection_name=COLLECTION_NAME, exact=False).count
     return {
         "collection": COLLECTION_NAME,
         "point_count": point_count,
-        "document_count": count_unique_doc_ids(client),
+        "document_count": count_indexed_docs(),
     }
 
 
