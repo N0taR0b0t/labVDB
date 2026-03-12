@@ -61,13 +61,13 @@ The tool should be able to run using:
 
 ## Architectural Direction
 
-The chosen middle path is:
+The current architecture after Phases 1–3:
 
-1. Keep one local Qdrant collection.
-2. Use a lightweight local manifest for ingest state.
-3. Use content-based `doc_id` values for deduplication and reindex safety.
-4. Add payload indexes for fields used in filtering.
-5. Improve chunking and cleanup before adding infrastructure complexity.
+1. Qdrant server (via `QDRANT_URL`) for vector search only — lightweight payloads, no full text.
+2. `manifest.sqlite3` as authoritative source of truth for document inventory and indexing state.
+3. `chunks.sqlite3` for full chunk text, keyed by `chunk_id` — fetched on demand, not during search.
+4. Content-based `doc_id` (SHA1) for deduplication and reindex safety.
+5. Payload indexes on `doc_id`, `filename`, `section`, `page`, `indexed_at` — active in server mode.
 6. Move toward hybrid retrieval instead of relying on dense-only search.
 7. Add basic observability so performance tradeoffs are measurable.
 
@@ -152,19 +152,19 @@ Stop treating Qdrant as both the search engine and the system-of-record.
 
 ### Implementation phases
 
-#### Critical (must complete before scaling)
+#### Critical (must complete before scaling) — all three complete
 
-**Phase 1 — Deploy server Qdrant with disk-backed operation**
+**Phase 1 — Deploy server Qdrant with disk-backed operation** ✓
 
-Move from embedded local mode (`QdrantClient(path=...)`) to a standalone Qdrant server or Docker container (`QdrantClient(url=...)`). Configure on-disk vectors, on-disk HNSW, scalar quantization, and persistent SSD storage. Target: 8 GB RAM machine with SSD mandatory.
+`get_client()` reads `QDRANT_URL` from env at call time; connects to server if set, embedded fallback if absent. New collections created with scalar quantization (INT8) and `on_disk_payload=True`. `ensure_payload_indexes()` catches only 400 responses (index already exists); real errors propagate. FastAPI client moved into lifespan handler. `/health` endpoint added. `docker-compose.yml` and `.env.example` provided.
 
-**Phase 2 — Make the manifest authoritative; eliminate whole-collection scans**
+**Phase 2 — Make the manifest authoritative; eliminate whole-collection scans** ✓
 
-Treat `manifest.sqlite3` as the sole source of truth for which PDFs are known, whether a PDF changed, and whether it was indexed successfully. Remove Qdrant-wide scroll scans from the indexing planner and stats endpoint. Use `(path, size, mtime_ns, hash optional)` to detect file changes. A manual reconcile command should exist for repair, not as the normal code path.
+`plan_index_jobs()` uses manifest `(status, doc_id, size, mtime_ns)` for all skip/change decisions — no `fetch_doc_ids()` scroll. Changed-file delete fires unconditionally (Qdrant no-op if point absent). `count_indexed_docs()` (SQLite `COUNT`) replaces scroll-based document counting in `/stats`. `--reconcile` CLI flag performs the only permitted full scroll, explicitly as a maintenance tool.
 
-**Phase 3 — Remove full chunk text from Qdrant payloads**
+**Phase 3 — Remove full chunk text from Qdrant payloads** ✓
 
-Store only lightweight search payload in Qdrant: `doc_id`, `filename`, `page`, `chunk_idx`, `section`, and a short preview. Store full chunk text in a separate SQLite chunk table keyed by `chunk_id`. The API fetches full text only for selected results when needed.
+Full chunk text stored in `chunks.sqlite3` (table: `chunk_id, doc_id, full_text`). SQLite write happens before Qdrant upsert in `flush_records()`. Qdrant payload carries `preview` (200 chars) only — no `text` field. `delete_document()` cleans Qdrant then chunk store. `/search` returns `preview` + `chunk_id`. New `GET /chunk/{chunk_id}` endpoint fetches full text from SQLite on demand; returns 404 if not found.
 
 #### Supplemental (improves perceived speed; not a prerequisite for scaling)
 

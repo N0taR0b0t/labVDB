@@ -9,10 +9,13 @@ Current baseline
   - manifest-authoritative indexing planner — no Qdrant scroll (Phase 2 complete)
   - count_indexed_docs() for /stats — SQLite only, no scroll (Phase 2 complete)
   - --reconcile CLI command for repair (Phase 2 complete)
+  - full chunk text in chunks.sqlite3; Qdrant payload holds preview only (Phase 3 complete)
+  - /chunk/{chunk_id} endpoint for full text retrieval (Phase 3 complete)
+  - delete_document cleans both Qdrant and chunk store (Phase 3 complete)
   - content-based `doc_id`
   - batched embedding and batched upserts
   - section-aware chunking
-  - `/search`, `/stats`, `/health` API endpoints
+  - `/search`, `/stats`, `/health`, `/chunk/{chunk_id}` API endpoints
   - docker-compose.yml for Qdrant server deployment
 - Current observed repo state:
   - 182 PDFs in `pdfs/`
@@ -123,10 +126,12 @@ Phase 2 — Make manifest authoritative, remove collection scans [COMPLETE]
 - DONE: --reconcile CLI command (single scroll, read-only, maintenance only)
 - DONE: pymupdf import deferred; planner is importable without PDF library
 
-Phase 3 — Move full chunk text out of Qdrant payloads
-- Store only doc_id, filename, page, chunk_idx, section, short preview in Qdrant
-- Store full chunk text in a new SQLite chunk table keyed by chunk_id
-- Fetch full text from SQLite only for selected results
+Phase 3 — Move full chunk text out of Qdrant payloads [COMPLETE]
+- DONE: chunks.sqlite3 with (chunk_id, doc_id, full_text); index on doc_id
+- DONE: flush_records writes SQLite before Qdrant upsert; payload has preview (200 chars) not text
+- DONE: delete_document cleans Qdrant then chunk store
+- DONE: /search returns preview + chunk_id; no full text in response
+- DONE: GET /chunk/{chunk_id} fetches full text from SQLite on demand; 404 if missing
 
 Supplemental phase (improves perceived speed; not required for scaling):
 
@@ -141,7 +146,7 @@ after deploying Phase 1. The manifest tracks all state needed for the re-index p
 Suggested execution order
 1. ~~Phase 1 — server Qdrant~~ COMPLETE
 2. ~~Phase 2 — manifest authority~~ COMPLETE
-3. Phase 3 — chunk text to SQLite (reduces Qdrant storage and payload overhead)
+3. ~~Phase 3 — chunk text to SQLite~~ COMPLETE
 4. Hybrid retrieval in `/search`
 5. Documentation refresh
 6. Phase 4 — progressive loading (supplemental UX improvement)
