@@ -1,161 +1,77 @@
 labVDB prioritized TODO
 
-Current baseline
-- Local PDF search prototype is working.
-- Core components already exist:
-  - server Qdrant support via QDRANT_URL env var (Phase 1 complete)
-  - scalar quantization + on_disk_payload on collection creation (Phase 1 complete)
-  - lifespan-managed client in search_api; /health endpoint (Phase 1 complete)
-  - manifest-authoritative indexing planner — no Qdrant scroll (Phase 2 complete)
-  - count_indexed_docs() for /stats — SQLite only, no scroll (Phase 2 complete)
-  - --reconcile CLI command for repair (Phase 2 complete)
-  - full chunk text in chunks.sqlite3; Qdrant payload holds preview only (Phase 3 complete)
-  - /chunk/{chunk_id} endpoint for full text retrieval (Phase 3 complete)
-  - delete_document cleans both Qdrant and chunk store (Phase 3 complete)
-  - content-based `doc_id`
-  - batched embedding and batched upserts
-  - section-aware chunking
-  - `/search`, `/stats`, `/health`, `/chunk/{chunk_id}` API endpoints
-  - docker-compose.yml for Qdrant server deployment
-- Current observed repo state:
-  - 182 PDFs in `pdfs/`
-  - 178 unique indexed documents
-  - 4,929 indexed chunks
+Current baseline (as of 2026-03-12)
+- Phases 1–3 complete (server Qdrant, manifest authority, chunk text in SQLite)
+- 182 PDFs in corpus; 178 unique docs; 12,146 chunks indexed (full-corpus benchmark)
+- Benchmark confirmed working end-to-end: 0.73 docs/s indexing, 57ms query p50 (embedded)
+- rerank_hybrid fixed to use payload preview; chunk_id exposed in results
+- *.pdf added to .gitignore
 
-What needs the most attention next
+What "moving to production" means here
+- Single cheap server (Hetzner 8 GB / 80 GB SSD, ~$6.59/mo recommended)
+- Server Qdrant via docker-compose (already provided)
+- You are the only user for now — test in prod is fine
 
-1. Bring documentation in sync with the code
-- Current risk:
-  - repository docs still describe several already-completed limitations
-- Why it matters:
-  - future implementation decisions will be based on false assumptions
-  - review and planning become harder than necessary
-- Required changes:
-  - keep `TODO.txt` focused on remaining work only
-  - update `CONTEXT.md` to distinguish current behavior from planned server-mode features
-  - add a concise README with:
-    - setup
-    - indexing commands
-    - API usage
-    - known limitations
+Production checklist (ordered)
 
-2. Make hybrid retrieval real, not just planned
-- Current state:
-  - lexical scoring and hybrid reranking helpers exist
-  - `/search` still performs dense retrieval only
-- Why it matters:
-  - scientific terms, abbreviations, assay names, genes, and units often need lexical support
-- Required changes:
-  - rerank dense candidates with the existing lexical signal
-  - optionally expose a query parameter to compare dense-only vs hybrid behavior
-  - evaluate result quality on a small set of real lab queries
+1. Deploy to a server
+- Provision a Hetzner (or equivalent) CPU VPS
+- Install Docker + Docker Compose
+- Clone repo, copy .env from .env.example, set QDRANT_URL=http://localhost:6333
+- Run: docker-compose up -d
+- Run: uvicorn search_api:app --host 0.0.0.0 --port 8000
 
-3. Add stronger search filters and result controls
-- Current state:
-  - search supports `doc_id` and `filename`
-- Why it matters:
-  - larger corpora will need tighter narrowing and more controllable output
-- Required changes:
-  - add `section` filtering
-  - add pagination or cursor-style result navigation
-  - return richer result metadata where useful:
-    - section
-    - total pages
-    - source path or a safer alias
-  - consider snippet windows that emphasize the matched part of a chunk
+2. Run the initial full index
+- Copy pdfs/ to the server
+- Run: python indexer.py --pdf-dir pdfs/
+- This is the one-time ~4 hour batch job for 182 docs (scales to overnight for 10k)
+- Verify with: curl http://localhost:8000/stats
 
-4. Improve operational visibility
-- Current state:
-  - indexing prints basic timing totals
-  - search has a minimal `/stats` endpoint
-  - a local benchmark harness now exists for sample-based indexing and query throughput checks
-- Why it matters:
-  - without measurements, optimization work is guesswork
-- Required changes:
-  - log query latency, embedding latency, and Qdrant latency
-  - expose manifest status counts in `/stats` or a new admin endpoint
-  - extend the benchmark coverage to report:
-    - chunk count per document
-    - cold-start versus warm-start comparisons
-    - larger sample or full-corpus runs
+3. Verify search works end-to-end
+- Hit /health — confirms Qdrant connectivity
+- Run a few queries against /search
+- Spot-check /chunk/{chunk_id} returns full text for a result
+- Dense search p50 should be 10–50ms on server Qdrant (vs 17ms embedded at this corpus size)
 
-5. Clean up text extraction and chunk quality
-- Current state:
-  - block cleanup and section normalization exist
-  - extraction is still vulnerable to PDF noise
-- Why it matters:
-  - low-value chunks increase index size and reduce precision
-- Required changes:
-  - better header/footer suppression
-  - more robust handling of references-heavy pages
-  - improved paragraph grouping for multi-column PDFs
-  - optional heuristics to down-rank or drop low-information chunks
+4. Wire hybrid reranking into /search  ← first real feature work
+- Current state: /search returns dense-only results; rerank_hybrid exists but is not called
+- Required: call rerank_hybrid on the dense candidates before returning results
+- Add optional ?hybrid=false query param to compare modes if useful
+- This matters most for scientific terms, gene names, assay abbreviations
 
-6. Add focused validation coverage
-- Current gap:
-  - there is no lightweight automated check for ingest correctness or retrieval regressions
-- Why it matters:
-  - index behavior can silently drift as chunking and ingest logic evolve
-- Required changes:
-  - expand tests for:
-    - `doc_id` stability
-    - duplicate detection
-    - filter construction
-    - section-aware chunk boundaries on real extracted pages
-    - rename / remove / reindex behavior
-  - add a tiny regression query set for manual or scripted relevance checks
+5. Add section filter to /search
+- build_filter() already supports section; /search does not expose it
+- Add ?section= query param alongside existing doc_id and filename
 
-Architecture pivot — scaling to ~20,000 PDFs
+6. Expose manifest stats in /stats
+- manifest_stats() exists (returns per-status counts)
+- Add it to the /stats response so you can see failed/duplicate/indexed counts from the API
 
-The following phases implement the core design change: Qdrant for vector search only,
-SQLite manifest as authority, SQLite chunk store for full text.
+7. Write a README
+- Setup (clone, .env, docker-compose up, indexer.py)
+- Query API usage with curl examples
+- How to add new PDFs (drop in pdfs/, rerun indexer.py)
+- Known limitations (embedded vs server Qdrant, no auth)
 
-Critical phases (prerequisite for scaling):
-
-Phase 1 — Deploy server Qdrant [COMPLETE]
-- DONE: QdrantClient(url=QDRANT_URL) when env var set, embedded fallback otherwise
-- DONE: scalar quantization + on_disk_payload on collection creation
-- DONE: UnexpectedResponse 400 silenced in ensure_payload_indexes(); 5xx propagates
-- DONE: lifespan-managed client; no import-time Qdrant calls
-- DONE: /health endpoint; docker-compose.yml; .env.example
-
-Phase 2 — Make manifest authoritative, remove collection scans [COMPLETE]
-- DONE: plan_index_jobs() uses manifest for skip/change detection; no fetch_doc_ids() call
-- DONE: changed-file delete fires unconditionally (Qdrant no-op if absent)
-- DONE: count_indexed_docs() replaces count_unique_doc_ids() in /stats
-- DONE: --reconcile CLI command (single scroll, read-only, maintenance only)
-- DONE: pymupdf import deferred; planner is importable without PDF library
-
-Phase 3 — Move full chunk text out of Qdrant payloads [COMPLETE]
-- DONE: chunks.sqlite3 with (chunk_id, doc_id, full_text); index on doc_id
-- DONE: flush_records writes SQLite before Qdrant upsert; payload has preview (200 chars) not text
-- DONE: delete_document cleans Qdrant then chunk store
-- DONE: /search returns preview + chunk_id; no full text in response
-- DONE: GET /chunk/{chunk_id} fetches full text from SQLite on demand; 404 if missing
-
-Supplemental phase (improves perceived speed; not required for scaling):
+Supplemental (after production is stable)
 
 Phase 4 — Progressive result loading and UI filters
-- Return only filename, page, section, snippet, and score in initial search response
-- Load full chunk text on demand when the user opens a result
-- Add UI filters for filename, document, and section
+- Return preview + chunk_id in /search (already done)
+- Load full text only when user clicks a result (wire up /chunk/{chunk_id} in the UI)
+- Add filename/section filter controls to the HTML UI
 
-Migration note: switching to server Qdrant requires a full re-index. Run indexer.py --force
-after deploying Phase 1. The manifest tracks all state needed for the re-index pass.
+Text extraction quality
+- Header/footer suppression
+- Better handling of multi-column PDFs and references pages
+- Optional heuristics to drop low-information chunks
 
-Suggested execution order
-1. ~~Phase 1 — server Qdrant~~ COMPLETE
-2. ~~Phase 2 — manifest authority~~ COMPLETE
-3. ~~Phase 3 — chunk text to SQLite~~ COMPLETE
-4. Hybrid retrieval in `/search`
-5. Documentation refresh
-6. Phase 4 — progressive loading (supplemental UX improvement)
-7. Observability and benchmark harness
-8. Text cleanup improvements
-9. Validation coverage
+Validation coverage
+- doc_id stability tests
+- duplicate detection tests
+- rename/remove/reindex behavior
 
 Non-goals for now
 - multi-tenant auth
-- production-grade frontend work
+- production-grade frontend
 - distributed ingestion workers
 - expensive always-on reranking infrastructure
