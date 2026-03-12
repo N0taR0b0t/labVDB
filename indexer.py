@@ -9,12 +9,14 @@ from typing import NamedTuple
 from qdrant_client.models import FilterSelector, PointStruct
 
 from labvdb import (
+    CHUNK_PREVIEW_CHARS,
     COLLECTION_NAME,
     MODEL_NAME,
     batched,
     build_filter,
     chunk_page_text,
     compute_doc_id,
+    delete_chunks_for_doc,
     elapsed_seconds,
     ensure_collection,
     fetch_doc_ids,  # used by --reconcile only
@@ -23,6 +25,7 @@ from labvdb import (
     load_manifest_entries,
     make_chunk_id,
     update_manifest_entry,
+    write_chunks,
 )
 
 
@@ -55,11 +58,13 @@ def delete_document(client, doc_id: str) -> None:
     if doc_filter is None:
         raise ValueError("doc_id is required for deletion")
 
+    # Remove from Qdrant first (removes searchability), then from chunk store.
     client.delete(
         collection_name=COLLECTION_NAME,
         points_selector=FilterSelector(filter=doc_filter),
         wait=True,
     )
+    delete_chunks_for_doc(doc_id)
 
 
 def resolve_pdf_paths(args: argparse.Namespace) -> list[Path]:
@@ -188,21 +193,30 @@ def flush_records(
     )
     stats["embed_seconds"] += elapsed_seconds(embed_started)
 
+    doc_id = metadata["doc_id"]
+    chunk_rows: list[tuple[str, str, str]] = []
     points = []
     for (page_num, chunk_idx, section, text), embedding in zip(pending_records, embeddings):
+        chunk_id = make_chunk_id(doc_id, page_num, chunk_idx)
+        chunk_rows.append((chunk_id, doc_id, text))
         points.append(
             PointStruct(
-                id=make_chunk_id(metadata["doc_id"], page_num, chunk_idx),
+                id=chunk_id,
                 vector=embedding.tolist(),
                 payload={
                     **metadata,
                     "page": page_num,
                     "chunk_idx": chunk_idx,
                     "section": section,
-                    "text": text,
+                    "preview": text[:CHUNK_PREVIEW_CHARS],
                 },
             )
         )
+
+    # Write full text to SQLite before upserting to Qdrant.
+    # If Qdrant upsert fails, text rows are harmless orphans recoverable by re-index.
+    # If SQLite write fails, nothing enters Qdrant and the next run retries cleanly.
+    write_chunks(chunk_rows)
 
     upsert_started = time.perf_counter()
     for point_batch in batched(points, upsert_batch_size):

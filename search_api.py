@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 import uvicorn
 
@@ -13,6 +13,7 @@ from labvdb import (
     count_indexed_docs,
     count_unique_doc_ids,  # retained for reconcile; not called during normal operation
     ensure_collection,
+    fetch_chunk_text,
     get_client,
     load_embedding_model,
 )
@@ -34,6 +35,14 @@ app = FastAPI(title="PDF Search", lifespan=lifespan)
 def health(request: Request):
     request.app.state.client.get_collections()
     return {"status": "ok"}
+
+
+@app.get("/chunk/{chunk_id}")
+def chunk(chunk_id: str):
+    text = fetch_chunk_text(chunk_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    return {"chunk_id": chunk_id, "text": text}
 
 
 @app.get("/search")
@@ -58,7 +67,6 @@ def search(
 
     formatted_results = []
     for hit in results:
-        text = hit.payload["text"]
         formatted_results.append(
             {
                 "score": hit.score,
@@ -66,7 +74,8 @@ def search(
                 "filename": hit.payload["filename"],
                 "page": hit.payload["page"],
                 "chunk_idx": hit.payload["chunk_idx"],
-                "text": text[:300] + "..." if len(text) > 300 else text,
+                "chunk_id": str(hit.id),
+                "preview": hit.payload.get("preview", ""),
             }
         )
 

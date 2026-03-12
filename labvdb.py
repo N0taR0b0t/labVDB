@@ -35,6 +35,8 @@ QDRANT_PATH = "qdrant_storage"
 VECTOR_SIZE = 384
 HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
 MANIFEST_PATH = Path("manifest.sqlite3")
+CHUNK_STORE_PATH = Path("chunks.sqlite3")
+CHUNK_PREVIEW_CHARS = 200
 CHUNK_TARGET_CHARS = 1800
 CHUNK_MIN_CHARS = 500
 CHUNK_OVERLAP_BLOCKS = 1
@@ -282,6 +284,50 @@ def manifest_stats() -> dict[str, int]:
             "SELECT status, COUNT(*) FROM manifest GROUP BY status"
         ).fetchall()
     return {status: count for status, count in rows}
+
+
+def ensure_chunk_db() -> None:
+    with sqlite3.connect(CHUNK_STORE_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id TEXT PRIMARY KEY,
+                doc_id   TEXT NOT NULL,
+                full_text TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id)"
+        )
+        conn.commit()
+
+
+def write_chunks(rows: list[tuple[str, str, str]]) -> None:
+    """Insert or replace (chunk_id, doc_id, full_text) rows."""
+    ensure_chunk_db()
+    with sqlite3.connect(CHUNK_STORE_PATH) as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO chunks(chunk_id, doc_id, full_text) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+
+def fetch_chunk_text(chunk_id: str) -> str | None:
+    ensure_chunk_db()
+    with sqlite3.connect(CHUNK_STORE_PATH) as conn:
+        row = conn.execute(
+            "SELECT full_text FROM chunks WHERE chunk_id = ?", (chunk_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def delete_chunks_for_doc(doc_id: str) -> None:
+    ensure_chunk_db()
+    with sqlite3.connect(CHUNK_STORE_PATH) as conn:
+        conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+        conn.commit()
 
 
 def compute_doc_id(pdf_path: Path) -> str:
