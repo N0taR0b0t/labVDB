@@ -167,7 +167,7 @@ def ui():
                         <span class="score">Score: ${r.score.toFixed(3)}</span>
                         <div class="filename">${r.filename}</div>
                         <div class="meta">doc_id ${r.doc_id} | page ${r.page} | chunk ${r.chunk_idx}</div>
-                        <div class="text">${r.text}</div>
+                        <div class="text">${r.preview}</div>
                     </div>
                 `).join('');
             }

@@ -525,9 +525,9 @@ def rerank_hybrid(query: str, results: list, limit: int) -> list[dict[str, objec
 
     reranked = []
     for result in results:
-        text = result.payload["text"]
+        preview = result.payload.get("preview", result.payload.get("text", ""))
         dense = (float(result.score) - min_dense) / spread if spread > 0 else 1.0
-        lexical = lexical_score(query, text)
+        lexical = lexical_score(query, preview)
         final_score = dense * 0.75 + lexical * 0.25
         reranked.append(
             {
@@ -539,7 +539,8 @@ def rerank_hybrid(query: str, results: list, limit: int) -> list[dict[str, objec
                 "page": result.payload["page"],
                 "chunk_idx": result.payload["chunk_idx"],
                 "section": result.payload.get("section", "Unknown"),
-                "text": text,
+                "chunk_id": str(result.id),
+                "preview": preview,
             }
         )
 
