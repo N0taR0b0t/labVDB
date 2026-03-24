@@ -311,8 +311,15 @@ def manifest_stats() -> dict[str, int]:
     return {status: count for status, count in rows}
 
 
+_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
 def ensure_chunk_db() -> None:
     with sqlite3.connect(CHUNK_STORE_PATH) as conn:
+        fts_existed = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+        ).fetchone()[0] > 0
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chunks (
@@ -325,6 +332,39 @@ def ensure_chunk_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id)"
         )
+
+        # FTS5 content table backed by chunks with Porter stemming.
+        # Uses content= so full text is not duplicated on disk.
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                full_text,
+                content='chunks',
+                content_rowid='rowid',
+                tokenize='porter unicode61'
+            )
+            """
+        )
+        # Keep FTS5 in sync automatically via triggers.
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, full_text)
+                VALUES (new.rowid, new.full_text);
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, full_text)
+                VALUES ('delete', old.rowid, old.full_text);
+            END
+            """
+        )
+        if not fts_existed:
+            # First run after upgrade — backfill FTS5 from any existing chunks.
+            conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
         conn.commit()
 
 
@@ -346,6 +386,52 @@ def fetch_chunk_text(chunk_id: str) -> str | None:
             "SELECT full_text FROM chunks WHERE chunk_id = ?", (chunk_id,)
         ).fetchone()
     return row[0] if row else None
+
+
+def fts_lexical_scores(query: str, chunk_ids: list[str]) -> dict[str, float]:
+    """Return BM25 scores normalised to [0, 1] for the given chunk_ids.
+
+    Queries the FTS5 index in chunks.sqlite3.  chunk_ids absent from the
+    FTS5 results (zero term overlap) are not included in the returned dict
+    and should be treated as 0.0 by the caller.
+
+    Uses alphanumeric tokenisation matching FTS5's unicode61 tokeniser so
+    that hyphenated scientific terms like 'acyl-CoA' are split correctly.
+    Returns an empty dict if FTS5 is unavailable or no terms match.
+    """
+    tokens = [t.lower() for t in _FTS_TOKEN_RE.findall(query) if len(t) >= 2]
+    if not tokens or not chunk_ids:
+        return {}
+
+    fts_query = " OR ".join(tokens)
+    chunk_id_set = set(chunk_ids)
+
+    ensure_chunk_db()
+    try:
+        with sqlite3.connect(CHUNK_STORE_PATH) as conn:
+            rows = conn.execute(
+                """
+                SELECT c.chunk_id, -bm25(chunks_fts) AS score
+                FROM chunks_fts
+                JOIN chunks c ON c.rowid = chunks_fts.rowid
+                WHERE chunks_fts MATCH ?
+                ORDER BY score DESC
+                LIMIT 500
+                """,
+                (fts_query,),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+
+    relevant = {cid: s for cid, s in rows if cid in chunk_id_set}
+    if not relevant:
+        return {}
+
+    max_score = max(relevant.values())
+    if max_score <= 0:
+        return {cid: 0.0 for cid in relevant}
+
+    return {cid: s / max_score for cid, s in relevant.items()}
 
 
 def delete_chunks_for_doc(doc_id: str) -> None:
@@ -576,6 +662,9 @@ def rerank_hybrid(query: str, results: list, limit: int) -> list[dict[str, objec
     if not results:
         return []
 
+    chunk_ids = [str(result.id) for result in results]
+    bm25 = fts_lexical_scores(query, chunk_ids)
+
     dense_scores = [float(result.score) for result in results]
     min_dense = min(dense_scores)
     max_dense = max(dense_scores)
@@ -583,9 +672,11 @@ def rerank_hybrid(query: str, results: list, limit: int) -> list[dict[str, objec
 
     reranked = []
     for result in results:
+        chunk_id = str(result.id)
         preview = result.payload.get("preview", result.payload.get("text", ""))
         dense = (float(result.score) - min_dense) / spread if spread > 0 else 1.0
-        lexical = lexical_score(query, preview)
+        # Use BM25 from FTS5 when available; fall back to token-overlap scorer.
+        lexical = bm25.get(chunk_id, lexical_score(query, preview) if not bm25 else 0.0)
         final_score = dense * 0.75 + lexical * 0.25
         reranked.append(
             {
@@ -597,7 +688,7 @@ def rerank_hybrid(query: str, results: list, limit: int) -> list[dict[str, objec
                 "page": result.payload["page"],
                 "chunk_idx": result.payload["chunk_idx"],
                 "section": result.payload.get("section", "Unknown"),
-                "chunk_id": str(result.id),
+                "chunk_id": chunk_id,
                 "preview": preview,
             }
         )

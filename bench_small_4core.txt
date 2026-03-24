@@ -1,0 +1,76 @@
+Model: BAAI/bge-small-en-v1.5
+Loading model…
+Vector size: 384
+/home/matias/labVDB/labvdb.py:146: UserWarning: Payload indexes have no effect in the local Qdrant. Please use server Qdrant if you need payload indexes.
+  client.create_payload_index(
+Benchmark mode: sample
+Benchmark sample: 12 PDFs
+Temporary benchmark store: /tmp/labvdb-bench-rlxrhc3m
+
+Indexing
+  docs indexed: 12/12
+  chunks indexed: 854
+  pages indexed: 184
+  total points: 854
+  total time: 192.58s
+  planning time: 0.06s
+  hash time: 0.06s
+  extract time: 1.59s
+  embed time: 189.14s
+  upsert time: 1.52s
+  throughput: 0.06 docs/s, 4.43 chunks/s
+  density: 71.2 chunks/doc, 15.3 pages/doc
+
+Queries
+  queries used: 5
+  measured runs: 25
+  encode p50: 30.9 ms
+  dense search p50: 1.5 ms
+  hybrid rerank p50: 0.2 ms
+  total p50: 32.4 ms
+  total mean: 43.1 ms
+  throughput: 23.23 queries/s
+
+Top 3 results per query (hybrid reranked):
+
+  query: 'nitro oleic acid cardiovascular disease'
+   1. [0.750]  A nitroalkene derivative of salicylate, SANA, induces c…  p17  §Unknown
+       References 1. Flegal, K. M., Graubard, B. I., Williamson, D. F. & Gail, M. H. Causespecific excess deaths associated wit…
+   2. [0.351]  20-Hydroxyeicosatetraenoic Acid as a Predictor of Neuro…  p1  §Unknown
+       Key Words: arachidonic acid ◼ carotid stenosis ◼ myocardial infarction ◼ prognosis ◼ stroke  N eurological deterioration…
+   3. [0.266]  A natural small molecule isoginkgetin alleviates hyperc…  p2  §Introduction
+       Atherosclerosis is a complex and multifaceted vascular disease characterized by the accumulation of lipids, inflammatory…
+
+  query: 'acyl-CoA metabolism'
+   1. [0.750]  Acetyl CoA Carboxylase Inhibition Reduces Hepatic Steat…  p3  §Introduction
+       is derived from adipose tissue, while only 25% is derived from DNL. Nevertheless, it has been established that humans w…
+   2. [0.750]  Acetyl CoA Carboxylase Inhibition Reduces Hepatic Steat…  p3  §Introduction
+       is derived from adipose tissue, while only 25% is derived from DNL. Nevertheless, it has been established that humans w…
+   3. [0.591]  Acetyl CoA Carboxylase Inhibition Reduces Hepatic Steat…  p22  §References
+       Cell Metabolism Corrections  Acetyl CoA Carboxylase Inhibition Reduces Hepatic Steatosis but Elevates Plasma Triglycerid…
+
+  query: 'sphingolipid plasma neuropathy'
+   1. [0.750]  Acidic Hydrolysis of Plasmalogens Followed by High.Perf…  p1  §Unknown
+       A simple, quantitative method for determining the plasmalogen content of small samples is reported here. The method uses…
+   2. [0.566]  Acidic Hydrolysis of Plasmalogens Followed by High.Perf…  p1  §Unknown
+       Eric J. Murphya, *, Ralph Stephens b, Marianne Jurkowitz.Alexander a and Lloyd A. Horrocks a aDepartment of Medical Bioc…
+   3. [0.503]  Acidic Hydrolysis of Plasmalogens Followed by High.Perf…  p1  §Methods
+       Plasmalogens are important components of cellular membranes and may be involved in signal transduction following agenist…
+
+  query: 'stable isotope tracing lipid metabolism'
+   1. [0.750]  A guide to 13C metabolic flux analysis for the cancer b…  p9  §Unknown
+       Here FA is the macromolecular content of a particular fatty acid in cancer cells (in units nmol/106 cells; a typical val…
+   2. [0.690]  A guide to 13C metabolic flux analysis for the cancer b…  p9  §Unknown
+       Quantifying ﬂuxes in upper metabolism In the next two sections, we describe brieﬂy common stable-isotope tracing strateg…
+   3. [0.616]  A guide to 13C metabolic flux analysis for the cancer b…  p9  §Unknown
+       Fatty acid biosynthesis rate ¼ FA t  gðtÞ 1  g tð Þ ð6Þ  Here FA is the macromolecular content of a particular fatty a…
+
+  query: 'conjugated linoleic acid oxidation'
+   1. [0.750]  A natural small molecule isoginkgetin alleviates hyperc…  p5  §Methods
+       Theranostics 2025, Vol. 15, Issue 10  and quantified using a laser scanning confocal microscope (TCS SP8; Leica, Wetzlar…
+   2. [0.588]  A natural small molecule isoginkgetin alleviates hyperc…  p6  §Methods
+       Prior to oxidation, EDTA was removed from LDL solutions (YB-001; Yiyuan Biotechnologies, Guangzhou, China). Subsequently…
+   3. [0.497]  A natural small molecule isoginkgetin alleviates hyperc…  p6  §Methods
+       LDL oxidation and agarose gel electrophoresis  Prior to oxidation, EDTA was removed from LDL solutions (YB-001; Yiyuan B…
+
+Kept benchmark artifacts at /tmp/labvdb-bench-rlxrhc3m

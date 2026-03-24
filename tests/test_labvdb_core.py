@@ -203,5 +203,99 @@ class TestCanonicalizeSection(unittest.TestCase):
         self.assertIsNone(canonicalize_section("   "))
 
 
+class TestFtsLexicalScores(unittest.TestCase):
+    """Tests for the FTS5-backed BM25 lexical scorer."""
+
+    def setUp(self):
+        import labvdb
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_path = labvdb.CHUNK_STORE_PATH
+        labvdb.CHUNK_STORE_PATH = Path(self._tmp.name) / "chunks.sqlite3"
+
+    def tearDown(self):
+        import labvdb
+        labvdb.CHUNK_STORE_PATH = self._orig_path
+        self._tmp.cleanup()
+
+    def _write(self, rows: list[tuple[str, str, str]]) -> None:
+        from labvdb import write_chunks
+        write_chunks(rows)
+
+    def test_matching_chunk_gets_nonzero_score(self):
+        from labvdb import fts_lexical_scores
+        self._write([("id1", "doc1", "Fatty acid oxidation occurs in the mitochondria.")])
+        scores = fts_lexical_scores("fatty acid oxidation", ["id1"])
+        self.assertGreater(scores.get("id1", 0.0), 0.0)
+
+    def test_no_match_returns_zero(self):
+        from labvdb import fts_lexical_scores
+        self._write([("id1", "doc1", "The mitochondria processes fatty acids.")])
+        scores = fts_lexical_scores("quantum mechanics", ["id1"])
+        self.assertEqual(scores.get("id1", 0.0), 0.0)
+
+    def test_better_match_scores_higher(self):
+        from labvdb import fts_lexical_scores
+        self._write([
+            ("id1", "doc1", "Sphingomyelinase cleaves sphingomyelin into ceramide and phosphocholine."),
+            ("id2", "doc2", "The patient received standard care and monitoring."),
+        ])
+        scores = fts_lexical_scores("sphingomyelinase sphingomyelin ceramide", ["id1", "id2"])
+        self.assertGreater(scores.get("id1", 0.0), scores.get("id2", 0.0))
+
+    def test_best_match_normalised_to_one(self):
+        from labvdb import fts_lexical_scores
+        self._write([
+            ("id1", "doc1", "Acyl-CoA synthetase catalyzes the formation of acyl-CoA thioesters."),
+            ("id2", "doc2", "Carbohydrate metabolism follows different enzymatic routes."),
+        ])
+        scores = fts_lexical_scores("acyl-CoA metabolism", ["id1", "id2"])
+        self.assertGreater(len(scores), 0)
+        self.assertAlmostEqual(max(scores.values()), 1.0)
+
+    def test_chunk_id_not_in_fts_gets_zero(self):
+        from labvdb import fts_lexical_scores
+        self._write([("id1", "doc1", "Fatty acid beta oxidation pathway in peroxisomes.")])
+        scores = fts_lexical_scores("fatty acid", ["id1", "ghost-id"])
+        self.assertEqual(scores.get("ghost-id", 0.0), 0.0)
+
+    def test_bm25_not_fooled_by_term_repetition(self):
+        """BM25 length normalisation should not over-reward pathological repetition."""
+        from labvdb import fts_lexical_scores
+        chunk_informative = (
+            "Sphingomyelinase activity was significantly elevated in lipopolysaccharide-treated cells, "
+            "suggesting a role in ceramide-mediated apoptosis signalling."
+        )
+        # Repeat the query term 20× with no other content — BM25 penalises this via length norm.
+        chunk_spam = " ".join(["sphingomyelinase"] * 20)
+        self._write([
+            ("id_info", "doc1", chunk_informative),
+            ("id_spam", "doc2", chunk_spam),
+        ])
+        scores = fts_lexical_scores("sphingomyelinase activity", ["id_info", "id_spam"])
+        # Informative chunk should score at least as well as the spam chunk.
+        self.assertGreaterEqual(scores.get("id_info", 0.0), scores.get("id_spam", 0.0))
+
+    def test_fts_backfilled_from_pre_existing_chunks(self):
+        """Chunks written before the FTS5 table existed must be reachable after ensure_chunk_db."""
+        import sqlite3
+        import labvdb
+        db_path = labvdb.CHUNK_STORE_PATH
+        # Write chunk directly to the raw table, bypassing FTS5 triggers.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS chunks "
+                "(chunk_id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, full_text TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO chunks VALUES (?, ?, ?)",
+                ("pre-id", "doc0", "20-HETE is a potent vasoconstrictor in renal arterioles."),
+            )
+            conn.commit()
+        # Calling ensure_chunk_db should create FTS5 and backfill from existing rows.
+        labvdb.ensure_chunk_db()
+        scores = labvdb.fts_lexical_scores("20-HETE vasoconstrictor", ["pre-id"])
+        self.assertGreater(scores.get("pre-id", 0.0), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
