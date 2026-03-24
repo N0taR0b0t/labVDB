@@ -42,16 +42,41 @@ CHUNK_MIN_CHARS = 500
 CHUNK_OVERLAP_BLOCKS = 1
 SECTION_ALIASES = {
     "abstract": "Abstract",
+    "summary": "Abstract",
     "introduction": "Introduction",
     "background": "Introduction",
     "methods": "Methods",
     "materials and methods": "Methods",
+    "materials & methods": "Methods",
+    "patients and methods": "Methods",
+    "subjects and methods": "Methods",
+    "experimental procedures": "Methods",
+    "experimental design": "Methods",
+    "study design": "Methods",
     "methodology": "Methods",
+    "statistical analysis": "Methods",
+    "statistical methods": "Methods",
+    "statistics": "Methods",
+    "data analysis": "Methods",
     "results": "Results",
+    "results and discussion": "Results",
     "discussion": "Discussion",
     "conclusion": "Conclusion",
     "conclusions": "Conclusion",
     "references": "References",
+    "bibliography": "References",
+    "acknowledgments": "Acknowledgments",
+    "acknowledgements": "Acknowledgments",
+    "funding": "Acknowledgments",
+    "conflict of interest": "Acknowledgments",
+    "conflicts of interest": "Acknowledgments",
+    "supplemental": "Supplementary",
+    "supplementary": "Supplementary",
+    "supporting information": "Supplementary",
+    "abbreviations": "Abbreviations",
+    "keywords": "Keywords",
+    "key words": "Keywords",
+    "figure legends": "Figure Legends",
 }
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]+")
 
@@ -408,7 +433,15 @@ def fetch_doc_ids(client: QdrantClient, page_size: int = 256) -> set[str]:
 def canonicalize_section(text: str) -> str | None:
     candidate = re.sub(r"[^A-Za-z ]+", " ", text).strip().lower()
     candidate = re.sub(r"\s+", " ", candidate)
-    return SECTION_ALIASES.get(candidate)
+    if candidate in SECTION_ALIASES:
+        return SECTION_ALIASES[candidate]
+    # Sliding-window prefix match: handles "1. results and discussion", "3.2 methods", etc.
+    words = candidate.split()
+    for n in range(min(len(words), 5), 0, -1):
+        prefix = " ".join(words[:n])
+        if prefix in SECTION_ALIASES:
+            return SECTION_ALIASES[prefix]
+    return None
 
 
 def clean_block_text(text: str) -> str:
@@ -431,6 +464,29 @@ def page_blocks(page) -> list[str]:
     return texts
 
 
+_PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
+
+
+def is_junk_block(text: str) -> bool:
+    """Return True if a text block is a header, footer, or other low-information fragment."""
+    stripped = text.strip()
+    if len(stripped) < 20:
+        return True
+    if not any(c.isalpha() for c in stripped):
+        return True
+    # Running page header: mostly-uppercase line followed by a bare page number.
+    # Matches patterns like "FATTY ACID OXIDATION AND KETOGENESIS\n403".
+    lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+    if len(lines) == 2 and _PAGE_NUMBER_RE.fullmatch(lines[1]):
+        upper_ratio = sum(1 for c in lines[0] if c.isupper()) / max(len(lines[0]), 1)
+        if upper_ratio > 0.5 and len(lines[0]) <= 100:
+            return True
+    # Too few distinct content tokens to be meaningful.
+    if len(set(tokenize(stripped))) < 3:
+        return True
+    return False
+
+
 def chunk_page_text(page, page_num: int, default_section: str = "Unknown") -> list[ChunkRecord]:
     blocks = page_blocks(page)
     if not blocks:
@@ -440,8 +496,10 @@ def chunk_page_text(page, page_num: int, default_section: str = "Unknown") -> li
     paragraphs: list[tuple[str, str]] = []
     for block in blocks:
         heading = canonicalize_section(block)
-        if heading and len(block.split()) <= 8:
+        if heading and len(block.split()) <= 12:
             section = heading
+            continue
+        if is_junk_block(block):
             continue
         paragraphs.append((section, block))
 
@@ -550,3 +608,18 @@ def rerank_hybrid(query: str, results: list, limit: int) -> list[dict[str, objec
 
 def elapsed_seconds(start_time: float) -> float:
     return time.perf_counter() - start_time
+
+
+def sanitize_filename(name: str) -> str:
+    """Fix filenames mangled by ZIP extraction decoding UTF-8 bytes as CP437.
+
+    When a ZIP created on Windows stores UTF-8 filenames and unzip interprets
+    them as CP437, multi-byte sequences are decoded into wrong Unicode codepoints
+    (e.g. the right single quote U+2019 becomes the three-character sequence ΓÇÖ).
+    Re-encoding as CP437 and decoding as UTF-8 reverses this. Idempotent: names
+    that are already correct pass through unchanged.
+    """
+    try:
+        return name.encode("cp437").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name

@@ -24,6 +24,7 @@ from labvdb import (
     load_embedding_model,
     load_manifest_entries,
     make_chunk_id,
+    sanitize_filename,
     update_manifest_entry,
     write_chunks,
 )
@@ -48,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         "--reconcile",
         action="store_true",
         help="Compare manifest against Qdrant and report gaps. Read-only repair aid.",
+    )
+    parser.add_argument(
+        "--fix-filenames",
+        action="store_true",
+        help="Rename PDFs in --pdf-dir to fix CP437/UTF-8 ZIP extraction mojibake, then exit.",
     )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -242,7 +248,7 @@ def index_pdf(
     indexed_at = datetime.now(timezone.utc).isoformat()
     metadata = {
         "doc_id": job.doc_id,
-        "filename": job.pdf_path.name,
+        "filename": sanitize_filename(job.pdf_path.name),
         "source_path": str(job.pdf_path.resolve()),
         "indexed_at": indexed_at,
         "total_pages": len(doc),
@@ -259,10 +265,13 @@ def index_pdf(
     pending_records: list[tuple[int, int, str, str]] = []
 
     try:
+        current_section = "Unknown"
         for page_num in range(len(doc)):
             extract_started = time.perf_counter()
-            chunks = chunk_page_text(doc[page_num], page_num + 1)
+            chunks = chunk_page_text(doc[page_num], page_num + 1, default_section=current_section)
             stats["extract_seconds"] += elapsed_seconds(extract_started)
+            if chunks:
+                current_section = chunks[-1].section
             if not chunks:
                 continue
 
@@ -329,6 +338,25 @@ def print_summary(summary: dict[str, float], metrics: dict[str, float]) -> None:
     )
 
 
+def fix_filenames(pdf_dir: Path) -> None:
+    """Rename PDFs in pdf_dir whose names are CP437/UTF-8 ZIP extraction mojibake."""
+    renamed = 0
+    skipped_collision = 0
+    for path in sorted(pdf_dir.glob("*.pdf")):
+        clean = sanitize_filename(path.name)
+        if clean == path.name:
+            continue
+        target = path.parent / clean
+        if target.exists():
+            print(f"Skipped (collision): {path.name} -> {clean}")
+            skipped_collision += 1
+            continue
+        path.rename(target)
+        print(f"Renamed: {path.name} -> {clean}")
+        renamed += 1
+    print(f"fix-filenames: {renamed} renamed, {skipped_collision} skipped (collision)")
+
+
 def reconcile(client) -> None:
     """Compare manifest (indexed status) against Qdrant. Print gaps. Read-only."""
     from labvdb import manifest_stats
@@ -367,6 +395,10 @@ def main() -> None:
     args = parse_args()
     if args.embed_batch_size <= 0 or args.upsert_batch_size <= 0:
         raise ValueError("Batch sizes must be positive integers")
+
+    if args.fix_filenames:
+        fix_filenames(args.pdf_dir)
+        return
 
     overall_started = time.perf_counter()
     client = get_client()

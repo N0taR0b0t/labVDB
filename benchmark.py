@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import statistics
 import tempfile
@@ -34,14 +35,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-runs", type=int, default=1)
     parser.add_argument("--query", action="append", default=[])
     parser.add_argument("--keep-artifacts", action="store_true")
+    parser.add_argument(
+        "--model", default=labvdb.MODEL_NAME,
+        help="Embedding model to benchmark (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--show-results", type=int, default=0, metavar="N",
+        help="After benchmarking, print top N results per query for qualitative review",
+    )
     return parser.parse_args()
 
 
 def configure_paths(temp_root: Path) -> None:
     qdrant_path = temp_root / "qdrant_storage"
-    manifest_path = temp_root / "manifest.sqlite3"
     labvdb.QDRANT_PATH = str(qdrant_path)
-    labvdb.MANIFEST_PATH = manifest_path
+    labvdb.MANIFEST_PATH = temp_root / "manifest.sqlite3"
+    labvdb.CHUNK_STORE_PATH = temp_root / "chunks.sqlite3"
+    # Ensure the benchmark always uses embedded Qdrant, never the production server.
+    os.environ.pop("QDRANT_URL", None)
 
 
 def sample_pdfs(pdf_dir: Path, sample_size: int) -> list[Path]:
@@ -174,6 +185,23 @@ def benchmark_queries(
     }
 
 
+def show_query_results(*, client, model, queries: list[str], limit: int) -> None:
+    for query in queries:
+        print(f"\n  query: {query!r}")
+        vec = model.encode(query, normalize_embeddings=True).tolist()
+        dense = client.query_points(
+            collection_name=labvdb.COLLECTION_NAME,
+            query=vec,
+            limit=limit * 3,
+        ).points
+        results = labvdb.rerank_hybrid(query, dense, limit)
+        for i, r in enumerate(results, 1):
+            fname = r["filename"][:55] + "…" if len(r["filename"]) > 55 else r["filename"]
+            print(f"  {i:2}. [{r['score']:.3f}]  {fname}  p{r['page']}  §{r['section']}")
+            preview = r["preview"].replace("\n", " ")
+            print(f"       {preview[:120]}…")
+
+
 def format_seconds(value: float) -> str:
     return f"{value:.2f}s"
 
@@ -190,14 +218,23 @@ def main() -> None:
     )
     queries = args.query or list(DEFAULT_QUERIES)
 
+    # Override model globals before collection creation so VECTOR_SIZE is correct.
+    labvdb.MODEL_NAME = args.model
+
     temp_root = Path(tempfile.mkdtemp(prefix="labvdb-bench-"))
     client = None
 
     try:
         configure_paths(temp_root)
+
+        print(f"Model: {args.model}")
+        print(f"Loading model…")
+        model = labvdb.load_embedding_model(args.model)
+        labvdb.VECTOR_SIZE = int(model.encode("x", normalize_embeddings=True).shape[0])
+        print(f"Vector size: {labvdb.VECTOR_SIZE}")
+
         client = labvdb.get_client()
         labvdb.ensure_collection(client)
-        model = labvdb.load_embedding_model(labvdb.MODEL_NAME)
 
         mode = "full corpus" if args.full_corpus else "sample"
         print(f"Benchmark mode: {mode}")
@@ -251,6 +288,10 @@ def main() -> None:
         print(f"  total p50: {format_ms(queries_summary['total_p50_ms'])}")
         print(f"  total mean: {format_ms(queries_summary['total_mean_ms'])}")
         print(f"  throughput: {queries_summary['queries_per_second']:.2f} queries/s")
+
+        if args.show_results > 0:
+            print(f"\nTop {args.show_results} results per query (hybrid reranked):")
+            show_query_results(client=client, model=model, queries=queries, limit=args.show_results)
 
     finally:
         if client is not None:

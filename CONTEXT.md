@@ -68,8 +68,14 @@ The current architecture after Phases 1–3:
 3. `chunks.sqlite3` for full chunk text, keyed by `chunk_id` — fetched on demand, not during search.
 4. Content-based `doc_id` (SHA1) for deduplication and reindex safety.
 5. Payload indexes on `doc_id`, `filename`, `section`, `page`, `indexed_at` — active in server mode.
-6. Move toward hybrid retrieval instead of relying on dense-only search.
-7. Add basic observability so performance tradeoffs are measurable.
+6. Filename sanitization at ingest: `sanitize_filename()` in `labvdb.py` corrects CP437/UTF-8 ZIP extraction mojibake before filenames are stored in Qdrant payloads. The filesystem path used for change detection is unaffected. `indexer.py --fix-filenames` renames files on disk to match (22 files corrected on first production run).
+7. Hybrid retrieval active: `/search` calls `rerank_hybrid` by default (dense×0.75 + lexical×0.25); `?hybrid=false` for dense-only comparison.
+8. Section filter active: `/search` accepts `?section=`; UI has a section input field. Section metadata is now populated during indexing (re-index in progress as of 2026-03-19).
+9. Manifest stats in `/stats`: returns per-status counts from manifest.sqlite3.
+10. Header/footer suppression: `is_junk_block()` drops low-information blocks at ingest (running headers, bare page numbers, <3 distinct tokens).
+11. Per-document deduplication in `/search`: `?max_per_doc=` (default 2) caps chunks per document after reranking; cap skipped when `doc_id`/`filename` filter is active.
+12. Click-to-expand in UI: result previews expand to full chunk text on click via `/chunk/{chunk_id}`.
+13. Tests: `tests/test_labvdb_core.py` covers doc_id stability, duplicate detection, `is_junk_block`, and `canonicalize_section` (22 tests, all passing).
 
 ## Budget-Adjusted Architecture Principles
 
@@ -113,7 +119,7 @@ The current architecture after Phases 1–3:
   - metadata filters
   - lexical scoring
   - lightweight hybrid ranking
-- Consider `bge-m3` only if CPU performance remains acceptable and the quality gain justifies the higher cost.
+- Do not switch to `bge-m3`. Evaluated 2026-03-24 on 4-core EPYC VPS: embed phase took >10 min for 12 docs (vs ~190s for bge-small), making it 10–20× slower. At 15k PDFs indexing time would be measured in weeks. Rejected.
 - Do not design around large always-on scientific embedding models that assume bigger hardware.
 
 ## Retrieval Strategy Under Budget Constraints
@@ -135,6 +141,13 @@ Under a strict cost cap, the strongest path is usually:
 - Content-based document identity is required.
 - Model loading should be lazy and cache-aware.
 - Index planning should avoid unnecessary repeated database checks.
+- PDFs unzipped from Windows ZIPs on Linux frequently have CP437/UTF-8 mojibake in filenames. Run `--fix-filenames` after any new ZIP extraction before indexing.
+- On Ubuntu 24.04, pip is not available by default — install python3-pip and python3.12-venv, then use a venv.
+- `QDRANT_URL` is read from the environment at call time, not from `.env` automatically. Always `source .env` before starting uvicorn or the indexer, or the app silently falls back to embedded Qdrant.
+- Run the indexer with `PYTHONUNBUFFERED=1` so per-document log lines are written in real time rather than buffered until completion.
+- Section detection required both expanding `SECTION_ALIASES` and threading `current_section` across pages in `index_pdf`. Without cross-page carry, every page after the first reset to "Unknown" even when the section hadn't changed.
+- Running page headers (e.g. "FATTY ACID OXIDATION AND KETOGENESIS\n403") are a recurring chunk quality issue in scientific PDFs. They pass normal length checks but are caught by the two-line uppercase+page-number heuristic in `is_junk_block`.
+- `canonicalize_section` needs both a larger alias table and a sliding-window prefix match to handle numbered headings ("3.2 Statistical Analysis") and multi-word variants ("Patients and Methods"). Exact-match alone catches only a small fraction of real biomedical section headings.
 
 ## Planned Architecture Pivot for Scale
 
@@ -217,12 +230,11 @@ Managed vector infrastructure should be treated as optional, not the default.
 
 ### Current observed footprint
 
-Based on the current repository state:
+Based on the production deployment as of 2026-03-19:
 
-- 182 PDFs in the corpus
-- 178 unique documents indexed
-- 4,929 chunks in Qdrant
-- about 37 MB of Qdrant storage
+- 182 PDFs in the corpus (4 duplicate local, 178 unique indexed)
+- 12,146 chunks in Qdrant
+- about 37 MB of Qdrant storage (estimated; scales linearly)
 - about 470 MB of source PDFs
 
 ### Straight-line scale estimate for ~15,000 PDFs
@@ -248,6 +260,16 @@ In practice, disk planning should assume at least **60 to 80 GB** to leave room 
 - logs
 - rebuild headroom
 
+### Current deployment
+
+The system is running on an **IONOS VPS** (CPU-only, Ubuntu 24.04). Stack:
+- Docker: docker.io + docker-compose v1.29.2
+- Python: 3.12, venv at `.venv/`
+- Qdrant: server mode via docker-compose, data in `labvdb_qdrant_data` Docker volume
+- API: uvicorn on port 8000, public-facing, no auth (single user)
+- Initial corpus index complete 2026-03-19: 178 docs, 12,146 chunks
+- Measured latency: p50=30.2ms, p95=38.2ms
+
 ### Deployment cost options
 
 #### Option 1: local workstation
@@ -261,11 +283,9 @@ Estimated electricity cost:
 - roughly $2 to $8/month for a machine averaging about 15 W to 60 W continuously
 - this estimate uses the U.S. average residential electricity price of **17.24 cents/kWh** from EIA data for December 2025
 
-This is the cheapest path and remains the default recommendation for prototyping.
+#### Option 2: cheap self-hosted CPU VPS (current approach)
 
-#### Option 2: cheap self-hosted CPU VPS
-
-Representative March 11, 2026 pricing:
+The system currently runs on an IONOS VPS. Other comparable providers include:
 
 Hetzner Cloud:
 
@@ -284,7 +304,6 @@ Interpretation:
 
 - current corpus size is easily viable on a low-end CPU VPS
 - ~15,000 PDFs is still viable on a single modest CPU VPS if indexing remains batch-oriented
-- Hetzner is substantially more compatible with the $30/month cap than DigitalOcean for this project
 
 ### Managed vector hosting
 
@@ -324,19 +343,6 @@ The project remains financially viable under the $30/month constraint if it foll
 3. avoid always-on GPU dependencies
 4. avoid managed infrastructure unless its pricing is clearly below the self-hosted CPU VPS path
 
-### Recommended hosting path
+### Current hosting
 
-Near term:
-
-- run locally on a lab machine when possible, or
-- use one cheap Hetzner CPU VM
-
-Best practical hosted target:
-
-- **8 GB RAM / 80 GB SSD Hetzner Cloud** at about **$6.59/month**
-
-Safer medium-term target for ~15,000 PDFs:
-
-- **16 GB RAM / 160 GB SSD Hetzner Cloud** at about **$10.59/month**
-
-Both remain well below the project’s $30/month ceiling and leave room for incidental backup or storage overhead.
+The system is deployed on an **IONOS VPS** (CPU-only). This is already within the $30/month budget ceiling and leaves room for incidental backup or storage overhead.

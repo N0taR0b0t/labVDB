@@ -1,74 +1,101 @@
 labVDB prioritized TODO
 
-Current baseline (as of 2026-03-12)
+Current baseline (as of 2026-03-19)
 - Phases 1–3 complete (server Qdrant, manifest authority, chunk text in SQLite)
-- 182 PDFs in corpus; 178 unique docs; 12,146 chunks indexed (full-corpus benchmark)
-- Benchmark confirmed working end-to-end: 0.73 docs/s indexing, 57ms query p50 (embedded)
-- rerank_hybrid fixed to use payload preview; chunk_id exposed in results
-- *.pdf added to .gitignore
+- 182 PDFs in corpus; 178 unique indexed, 4 duplicate local; 12,146 chunks
+- Filename sanitization added (--fix-filenames, 22 files renamed on first run)
+- Production server benchmarks: p50=30.2ms, p95=38.2ms query latency (server Qdrant)
+- Hybrid reranking live: dense*0.75 + lexical*0.25, ?hybrid=false to compare
+- Section filter live: ?section= on /search
+- Manifest stats live: /stats now returns per-status counts
+- Deployed to IONOS VPS (Ubuntu 24.04); full index complete as of 2026-03-19
 
 What "moving to production" means here
-- Single cheap server (Hetzner 8 GB / 80 GB SSD, ~$6.59/mo recommended)
-- Server Qdrant via docker-compose (already provided)
-- You are the only user for now — test in prod is fine
+- Running on an IONOS VPS (Ubuntu 24.04), port 8000 open, no auth (single user, test in prod is fine)
+- Server Qdrant via docker-compose (docker.io + docker-compose v1.29.2)
+- Python 3.12 venv at .venv/; start with: set -a && source .env && set +a
 
 Production checklist (ordered)
 
-1. Deploy to a server
-- Provision a Hetzner (or equivalent) CPU VPS
-- Install Docker + Docker Compose
-- Clone repo, copy .env from .env.example, set QDRANT_URL=http://localhost:6333
-- Run: docker-compose up -d
-- Run: uvicorn search_api:app --host 0.0.0.0 --port 8000
+1. Deploy to a server ✓
+- Ubuntu 24.04 IONOS VPS
+- Installed: docker.io, docker-compose, python3-pip, python3.12-venv
+- python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+- cp .env.example .env  (QDRANT_URL=http://localhost:6333)
+- docker-compose up -d
+- set -a && source .env && set +a && nohup .venv/bin/uvicorn search_api:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+- NOTE: always source .env before starting uvicorn or the indexer — QDRANT_URL must be in the environment
 
-2. Run the initial full index
-- Copy pdfs/ to the server
-- Run: python indexer.py --pdf-dir pdfs/
-- This is the one-time ~4 hour batch job for 182 docs (scales to overnight for 10k)
-- Verify with: curl http://localhost:8000/stats
+2. Run the initial full index ✓
+- python indexer.py --fix-filenames --pdf-dir pdfs/  (renamed 22 mojibake filenames)
+- PYTHONUNBUFFERED=1 python indexer.py --pdf-dir pdfs/  ← use PYTHONUNBUFFERED=1 for real-time log output
+- notify_done.sh monitors /stats and sends an IFTTT notification when indexing completes
+- Result: 178 indexed, 4 duplicate local, 0 failed, 12,146 chunks
 
-3. Verify search works end-to-end
-- Hit /health — confirms Qdrant connectivity
-- Run a few queries against /search
-- Spot-check /chunk/{chunk_id} returns full text for a result
-- Dense search p50 should be 10–50ms on server Qdrant (vs 17ms embedded at this corpus size)
+3. Verify search works end-to-end ✓
+- /health: ok
+- /search: returning semantically relevant results
+- /chunk/{chunk_id}: full text retrieval working
+- Server Qdrant latency: p50=30.2ms, p95=38.2ms (within 10–50ms target)
 
-4. Wire hybrid reranking into /search  ← first real feature work
-- Current state: /search returns dense-only results; rerank_hybrid exists but is not called
-- Required: call rerank_hybrid on the dense candidates before returning results
-- Add optional ?hybrid=false query param to compare modes if useful
-- This matters most for scientific terms, gene names, assay abbreviations
+4. Wire hybrid reranking into /search ✓
+- rerank_hybrid called on 3× dense candidates before returning results
+- Scores: dense*0.75 + lexical*0.25; response includes dense_score and lexical_score
+- ?hybrid=false disables reranking for dense-only comparison
+- Default: hybrid=true
 
-5. Add section filter to /search
-- build_filter() already supports section; /search does not expose it
-- Add ?section= query param alongside existing doc_id and filename
+5. Add section filter to /search ✓
+- ?section= param wired through build_filter()
+- Section field included in all /search results
 
-6. Expose manifest stats in /stats
-- manifest_stats() exists (returns per-status counts)
-- Add it to the /stats response so you can see failed/duplicate/indexed counts from the API
+6. Expose manifest stats in /stats ✓
+- /stats now returns manifest: {indexed, duplicate_local, failed, ...}
 
-7. Write a README
+7. Write a README ✓
 - Setup (clone, .env, docker-compose up, indexer.py)
-- Query API usage with curl examples
+- Query API usage with curl examples (/search, /chunk, /stats, /health)
 - How to add new PDFs (drop in pdfs/, rerun indexer.py)
-- Known limitations (embedded vs server Qdrant, no auth)
+- Known limitations (no auth)
 
-Supplemental (after production is stable)
+What comes next (ordered by impact)
 
-Phase 4 — Progressive result loading and UI filters
-- Return preview + chunk_id in /search (already done)
-- Load full text only when user clicks a result (wire up /chunk/{chunk_id} in the UI)
-- Add filename/section filter controls to the HTML UI
+A. Progressive full-text loading in the UI ✓
+- Click-to-expand: clicking a result fetches /chunk/{chunk_id} and swaps in full text inline
+- Error recovery: failed fetches are retried on re-click
+- section shown in result meta line
 
-Text extraction quality
-- Header/footer suppression
-- Better handling of multi-column PDFs and references pages
-- Optional heuristics to drop low-information chunks
+B. Section filter controls in the UI ✓
+- Section input added to the filter row; wires to ?section= on /search
 
-Validation coverage
-- doc_id stability tests
-- duplicate detection tests
-- rename/remove/reindex behavior
+C. Section detection during indexing ✓
+- SECTION_ALIASES expanded from 10 to 37 entries covering common biomedical headings
+- canonicalize_section now does sliding-window prefix matching for numbered headings
+  (e.g. "3.2 Statistical Analysis" → "Methods")
+- Word-count guard raised from 8 to 12 words
+- current_section threaded across pages in indexer.py so multi-page sections carry forward
+- Full re-index running as of 2026-03-19 to populate section metadata
+
+D. Header/footer suppression ✓
+- is_junk_block() added; drops blocks that are: too short (<20 chars), no alpha chars,
+  running headers (mostly-uppercase line + bare page number), or <3 distinct tokens
+- Applied before chunking; result: ~4-10% fewer chunks per document
+
+E. Intra-document result deduplication ✓
+- _deduplicate() added in search_api.py; default max_per_doc=2
+- fetch_limit raised to limit*5 so there are enough candidates after dedup
+- ?max_per_doc= param on /search (1–10); cap skipped when doc_id or filename filter active
+
+F. Validation coverage ✓
+- tests/test_labvdb_core.py: 22 tests covering doc_id stability, duplicate detection,
+  is_junk_block, and canonicalize_section; all passing
+
+Supplemental (after the above are stable)
+
+- bge-m3 model evaluation ✓ (rejected 2026-03-24): benchmarked on 4-core EPYC VPS; embed phase
+  alone took >10 min for 12 docs vs ~190s for bge-small — 10-20x slower, not viable for 15k PDFs.
+  bge-small-en-v1.5 remains the model. Quality improvements via chunking/hybrid/filters instead.
+- Chunking strategy review: revisit chunk size and overlap once section detection is validated
+  in production and corpus grows significantly
 
 Non-goals for now
 - multi-tenant auth
