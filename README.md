@@ -201,7 +201,6 @@ The benchmark runs in a temporary isolated store — it does not touch the produ
 
 ## Known limitations
 
-- **No authentication.** The API is open. Suitable for single-user or trusted-network deployments only.
 - **No GPU required.** Indexing and query encoding run on CPU. Indexing throughput is modest (~1–3 docs/sec depending on hardware and PDF size).
 - **Section detection is heuristic.** Section labels are detected from heading text using a curated alias table and sliding-window prefix matching. Unusual heading formats will fall through as `Unknown`.
 - **Embedded Qdrant fallback.** If `QDRANT_URL` is not set, the app falls back to an embedded local Qdrant instance in `qdrant_storage/`. This is fine for development but not recommended for production use with large corpora.
